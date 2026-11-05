@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # ============================================================================
-#  SKILLUP DIGEST v2.0 "WORLD EDITION"  —  your personal daily newspaper
+#  SKILLUP DIGEST v2.1 "WORLD EDITION"  —  your personal daily newspaper
 # ----------------------------------------------------------------------------
 #  What it does (every day, automatically, on GitHub's free servers):
 #    1. SCANS   ~60 direct RSS feeds + Google News across 23 world regions
@@ -9,8 +9,13 @@
 #               last 7 days, removes duplicates (today AND across days)
 #    3. TAGS    every item [GLOBAL] or [NEPAL], AI/Health items float on top
 #    4. BUILDS  one professional PDF with 17 color-coded sections
-#    5. EMAILS  it to your inbox via Gmail
+#    5. EMAILS  a styled HTML briefing (counts + clickable top picks) and the
+#               PDF as an attachment via Gmail
 #
+#  v2.1: ELASTIC CAPS — a section flooded with fresh items grows up to 2x its
+#        base cap (CAP_ELASTIC_FACTOR); a quiet section shrinks on its own.
+#        Anything that doesn't fit today is NOT marked as seen, so it gets
+#        another chance tomorrow.
 #  v2.0 covers EVERY field: AI/tech, world, business, science, space, health,
 #  climate, sports, entertainment, Nepal + courses, certifications,
 #  scholarships, internships, hackathons, webinars, conferences, fellowships.
@@ -93,6 +98,11 @@ OPP_MAX_AGE_DAYS    = 7       # opportunities older than this are dropped
 ENTRIES_PER_QUERY   = 25      # how many RSS entries to read per Google query
 DIRECT_FEED_ENTRIES = 60      # how many entries to read per direct RSS feed
 MAX_SUMMARY_CHARS   = 220     # one-line summary length in the PDF
+CAP_ELASTIC_FACTOR  = 2.0     # a section flooded with fresh items grows up to
+                              # this x its base cap; quiet sections shrink on
+                              # their own. 1.0 = fixed caps, 99 = include all.
+EMAIL_TOP_PICKS     = 3       # clickable headlines per section in the email
+                              # body (0 = simple counts-only email)
 FETCH_WORKERS       = 10      # parallel HTTP downloads (I/O bound -> threads)
 REQUEST_JITTER      = (0.05, 0.25)  # polite random pause per request (secs)
 SEEN_FILE           = _env("SEEN_FILE", "seen.json")  # cross-day dedup memory
@@ -840,8 +850,16 @@ def process_sections(raw_sections):
             0 if it["date"] else 1,
             -(it["date"].timestamp() if it["date"] else 0),
         ))
-        final[sec["key"]] = bucket[:sec["cap"]]          # never pad past the cap
+        # -- ELASTIC CAP: keep everything available up to cap x factor. -----
+        #    Flooded section -> grows. Quiet section -> shrinks on its own.
+        #    Overflowing items are NOT marked seen -> they retry tomorrow.
+        limit = min(len(bucket), int(sec["cap"] * CAP_ELASTIC_FACTOR))
+        final[sec["key"]] = bucket[:limit]
         kept_items.extend(final[sec["key"]])
+        spill = len(bucket) - limit
+        log(f"  {sec['title']}: {len(bucket)} fresh -> keeping {limit}"
+            + (f"  [+{spill} spill over to tomorrow]" if spill > 0 else "")
+            + (f"  (expanded, base cap {sec['cap']})" if limit > sec["cap"] else ""))
 
     log(f"Pipeline: {dropped_dup} duplicates removed, {dropped_old} too old, "
         f"{len(kept_items)} items kept for the PDF")
@@ -1012,43 +1030,132 @@ def build_pdf(sections):
 
 
 # ============================================================================
-# 7. GMAIL DELIVERY
+# 7. EMAIL DELIVERY — styled HTML briefing + plain-text fallback + PDF
 # ============================================================================
 
-def send_email(pdf_path, total, sections):
-    """Attach the PDF and send via Gmail SMTP. Returns True/False."""
-    if not GMAIL_APP_PASSWORD:
-        log("GMAIL_APP_PASSWORD not set — skipping email (PDF saved locally). "
-            "On GitHub Actions add the secret; see README Step 4.", "warn")
-        return False
-    recipients = [e.strip() for e in RECIPIENT_EMAIL.split(",") if e.strip()]
-    msg = MIMEMultipart()
-    msg["From"] = GMAIL_USER
-    msg["To"] = ", ".join(recipients)
-    msg["Subject"] = f"🎓 SkillUp Digest — {total} updates + news — {DATE_STR}"
-    msg["Date"] = formatdate(localtime=True)
+def _email_html(total, sections):
+    """The email body: colored section chips with counts, then clickable
+    top picks per section. Inline CSS only (Gmail strips <style> blocks)."""
+    n_news = sum(len(sections.get(s["key"], [])) for s in SECTIONS
+                 if s["key"] in NEWS_SECTION_KEYS)
+    n_opp = total - n_news
 
-    lines = ["Hello!", "", "Here is today's SkillUp Digest.", "",
-             f"{total} new items across {len(SECTIONS)} sections:"]
+    rows = ""
+    picks = ""
     for sec in SECTIONS:
-        lines.append(f"  • {sec['title']}: {len(sections[sec['key']])}")
-    lines += ["", "The full PDF newsletter is attached — every title is a "
-              "clickable link to the original source.", "",
-              f"Sources scanned: {STATS['ok']} OK, {STATS['fail']} warnings.", "",
-              "— Generated by SkillUp Digest (GitHub Actions, $0/month)"]
-    msg.attach(MIMEText("\n".join(lines), "plain", "utf-8"))
+        items = sections.get(sec["key"], [])
+        rows += (
+            '<tr>'
+            f'<td style="padding:5px 0;font-size:14px;color:#0f172a;">'
+            f'<span style="display:inline-block;width:12px;height:12px;'
+            f'background-color:{sec["color"]};border-radius:3px;'
+            f'margin-right:10px;vertical-align:middle;"></span>'
+            f'{esc(sec["title"])}</td>'
+            f'<td align="right" style="padding:5px 0;font-size:14px;'
+            f'font-weight:bold;color:#334155;">{len(items)}</td>'
+            '</tr>')
+        if items and EMAIL_TOP_PICKS > 0:
+            links = "<br>".join(
+                f'<a href="{esc_url(it["url"] or "#")}" '
+                f'style="color:#1D4ED8;text-decoration:none;">'
+                f'{esc(it["title"])}</a>'
+                for it in items[:EMAIL_TOP_PICKS])
+            picks += (
+                '<div style="margin:14px 0 0 0;">'
+                f'<div style="font-size:11.5px;font-weight:bold;'
+                f'color:{sec["color"]};letter-spacing:1px;">'
+                f'{esc(sec["title"])}</div>'
+                '<div style="font-size:13.5px;color:#334155;'
+                f'line-height:1.6;margin-top:4px;">{links}</div>'
+                '</div>')
+
+    top_block = ""
+    if picks:
+        top_block = ('<div style="font-size:15px;font-weight:bold;'
+                     'color:#0F172A;margin:22px 0 0 0;">&#11088; Top picks'
+                     ' &mdash; tap a headline to read it</div>' + picks)
+
+    return f"""
+<div style="margin:0;padding:0;background-color:#EEF2F7;">
+<div style="max-width:640px;margin:0 auto;padding:20px 10px;
+            font-family:Arial,Helvetica,sans-serif;">
+ <div style="background-color:#FFFFFF;border:1px solid #E2E8F0;
+             border-radius:12px;overflow:hidden;">
+  <div style="background-color:#1D4ED8;padding:22px 26px;">
+   <div style="color:#FFFFFF;font-size:24px;font-weight:bold;">
+    &#127891; SkillUp Digest</div>
+   <div style="color:#BFDBFE;font-size:13px;margin-top:6px;">
+    {DATE_STR} &nbsp;&middot;&nbsp; {total} fresh items
+    &nbsp;&middot;&nbsp; {n_news} news + {n_opp} opportunities</div>
+  </div>
+  <div style="padding:22px 26px;">
+   <p style="font-size:14px;color:#334155;margin:0 0 14px 0;">
+    Hello! Here is today's briefing. The full PDF newsletter is attached
+    &mdash; every title inside is a clickable link to the original source.</p>
+   <table style="width:100%;border-collapse:collapse;">{rows}</table>
+   {top_block}
+   <p style="font-size:12px;color:#64748B;margin:22px 0 0 0;">
+    Sources scanned: {STATS['ok']} OK, {STATS['fail']} warnings
+    &nbsp;&middot;&nbsp; news from the last {NEWS_MAX_AGE_HOURS} h
+    &nbsp;&middot;&nbsp; opportunities from the last {OPP_MAX_AGE_DAYS} days</p>
+   <p style="font-size:12px;color:#94A3B8;margin:8px 0 0 0;">
+    &mdash; Generated by SkillUp Digest on GitHub Actions ($0/month)</p>
+  </div>
+ </div>
+</div>
+</div>"""
+
+
+def build_email_message(pdf_path, total, sections):
+    """Compose the complete email: plain text + HTML alternative + PDF."""
+    recipients = [e.strip() for e in RECIPIENT_EMAIL.split(",") if e.strip()]
+
+    plain_lines = ["Hello!", "", "Here is today's SkillUp Digest.", "",
+                   f"{total} new items across {len(SECTIONS)} sections:"]
+    for sec in SECTIONS:
+        plain_lines.append(f"  • {sec['title']}: {len(sections.get(sec['key'], []))}")
+    plain_lines += ["", "Top picks:"]
+    for sec in SECTIONS:
+        for it in sections.get(sec["key"], [])[:EMAIL_TOP_PICKS]:
+            plain_lines.append(f"  - {it['title']}: {it['url']}")
+    plain_lines += ["", "The full PDF newsletter is attached.", "",
+                    f"Sources scanned: {STATS['ok']} OK, {STATS['fail']} warnings.",
+                    "", "— Generated by SkillUp Digest (GitHub Actions, $0/month)"]
+
+    mixed = MIMEMultipart("mixed")
+    mixed["From"] = GMAIL_USER
+    mixed["To"] = ", ".join(recipients)
+    mixed["Subject"] = f"🎓 SkillUp Digest — {total} updates + news — {DATE_STR}"
+    mixed["Date"] = formatdate(localtime=True)
+
+    alt = MIMEMultipart("alternative")
+    alt.attach(MIMEText("\n".join(plain_lines), "plain", "utf-8"))
+    alt.attach(MIMEText(_email_html(total, sections), "html", "utf-8"))
+    mixed.attach(alt)
 
     with open(pdf_path, "rb") as fh:
         attachment = MIMEApplication(fh.read(), _subtype="pdf")
     attachment.add_header("Content-Disposition", "attachment",
                           filename=os.path.basename(pdf_path))
-    msg.attach(attachment)
+    mixed.attach(attachment)
+    return mixed
+
+
+def send_email(pdf_path, total, sections):
+    """Send via SMTP (Gmail by default). Returns True/False."""
+    if not GMAIL_APP_PASSWORD:
+        log("GMAIL_APP_PASSWORD not set — skipping email (PDF saved locally). "
+            "On GitHub Actions add the secret; see README Step 4.", "warn")
+        return False
+    recipients = [e.strip() for e in RECIPIENT_EMAIL.split(",") if e.strip()]
+    msg = build_email_message(pdf_path, total, sections)
 
     try:
         with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, timeout=40) as server:
             server.login(GMAIL_USER, GMAIL_APP_PASSWORD)
             server.send_message(msg)
-        log(f"Email sent to {', '.join(recipients)}")
+        log(f"Email sent to {', '.join(recipients)} "
+            f"(HTML briefing + PDF attachment)")
         return True
     except smtplib.SMTPAuthenticationError:
         log("Gmail login REJECTED (535). Checklist: 1) it must be the 16-char "
@@ -1068,7 +1175,7 @@ def send_email(pdf_path, total, sections):
 
 def main():
     log("=" * 62)
-    log(f"SkillUp Digest v2.0 starting — {DATE_STR} (NPT)")
+    log(f"SkillUp Digest v2.1 starting — {DATE_STR} (NPT)")
     log(f"Recipient: {RECIPIENT_EMAIL} | App password set: {bool(GMAIL_APP_PASSWORD)}")
     log("=" * 62)
     try:

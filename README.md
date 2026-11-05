@@ -1,4 +1,4 @@
-# 🎓 SkillUp Digest v2.0 "World Edition" — Your Daily Newspaper
+# 🎓 SkillUp Digest v2.1 "World Edition" — Your Daily Newspaper
 
 A **100% free**, cloud-based system that scans **1,200+ sources across 23 world
 regions** every night and emails you **one professional PDF** at **5:00 AM
@@ -9,6 +9,15 @@ and fellowships.
 
 Your computer stays OFF. GitHub's servers do all the work. **Cost: $0/month.**
 
+> **What's new in v2.1 (vs v2.0)**
+> ① **Elastic caps** — a section flooded with fresh items now grows up to
+> **2× its base cap** (`CAP_ELASTIC_FACTOR = 2.0`), so big news days deliver
+> more (real test: **624 items / 32 pages**); quiet days shrink automatically;
+> overflow items are *not* marked seen, so they get another chance tomorrow.
+> ② **Beautiful HTML email** — the email is now a styled briefing with a blue
+> header, colored section chips + counts, and **clickable ⭐ Top picks (3 per
+> section)** — plus the same plain-text fallback and PDF attachment.
+>
 > **What's new in v2.0 (vs v1.3)**
 > | | v1.3 | v2.0 |
 > |---|---|---|
@@ -257,7 +266,9 @@ skillup-digest/
 ### Step 6 — Verify daily life
 
 - 📧 Check **Kusalkandel0@gmail.com** — subject looks like:
-  `🎓 SkillUp Digest — 300+ updates + news — 07 Nov 2026`
+  `🎓 SkillUp Digest — 500+ updates + news — 07 Nov 2026`. The email itself is
+  a styled briefing: colored section chips with counts + **⭐ Top picks**
+  (3 clickable headlines per section), with the full PDF attached.
 - 🔁 The **Commits** page will show a daily
   `chore: update seen.json [skip ci]` — that's the dedup memory being saved
   and it doubles as proof the repo is active (see F-4).
@@ -320,7 +331,8 @@ free-tier behaviour, not a bug.
 │ ■ WORLD NEWS                                          22    │  ← slate
 │ …                                                           │
 └─────────────────────────────────────────────────────────────┘
-(~15–20 pages, mobile-friendly A4)
+(~15–32 pages, mobile-friendly A4 — elastic caps let busy sections grow to
+2× their base cap, so a heavy news day can reach ~624 items)
 ```
 
 Design rules baked into the code: exact section order & colors, per-section
@@ -432,6 +444,16 @@ Use `"kind": "agg"` (auto-classified) or `"kind": "news"` with a fixed
 **Change caps, colors, order** — each line of `SECTIONS` holds `cap` and
 hex `"color"`. Reordering lines reorders the PDF. Total pages scale with the
 sum of caps.
+
+**Tune elastic caps** — `CAP_ELASTIC_FACTOR = 2.0`: on a big news day every
+section can grow to 2× its base cap (total up to 624 items). Set `1.0` for
+fixed caps, or `99` to include *everything* found (PDF gets very long).
+Anything that doesn't fit under the cap is **not** marked as seen — it
+automatically gets another chance in tomorrow's edition.
+
+**Tune the email** — `EMAIL_TOP_PICKS = 3` clickable headlines per section in
+the email body (`0` = counts only). The email is styled HTML with a
+plain-text fallback, so it renders nicely in Gmail mobile too.
 
 **Tune speed vs politeness** — `FETCH_WORKERS = 10` parallel downloads and
 `REQUEST_JITTER = (0.05, 0.25)` seconds pause per request. Lower workers to
