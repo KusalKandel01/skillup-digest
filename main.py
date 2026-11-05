@@ -50,15 +50,22 @@ from reportlab.platypus.flowables import HRFlowable
 # 1. SETTINGS — everything you might ever want to change lives right here
 # ============================================================================
 
+def _env(name, default):
+    """Read an env var safely. GitHub passes secrets you never created as an
+    EMPTY string (not as 'unset') — an empty value must fall back to the
+    default, otherwise int('') crashes and '' breaks the sender address."""
+    val = os.environ.get(name, "").strip()
+    return val or default
+
 # --- Email account ----------------------------------------------------------
 # GMAIL_APP_PASSWORD is a 16-character App Password — set it as a GitHub
 # Secret (or export it locally). It is NEVER written in this file.
-GMAIL_USER         = os.environ.get("GMAIL_USER", "Kusalkandel0@gmail.com")
+GMAIL_USER         = _env("GMAIL_USER", "Kusalkandel0@gmail.com")
 # Auto-clean the app password: Google displays it WITH spaces ("abcd efgh ijkl
 # mnop") and hidden newlines sneak in on paste — both break login silently.
 GMAIL_APP_PASSWORD = os.environ.get("GMAIL_APP_PASSWORD", "") \
     .replace(" ", "").replace("\n", "").replace("\r", "").replace("\t", "")
-RECIPIENT_EMAIL    = os.environ.get("RECIPIENT_EMAIL", GMAIL_USER)
+RECIPIENT_EMAIL    = _env("RECIPIENT_EMAIL", GMAIL_USER)
 #   ^ To add more recipients later, set the RECIPIENT_EMAIL secret to a
 #     comma-separated list, e.g.  "you@gmail.com,friend@gmail.com"
 
@@ -67,8 +74,11 @@ RECIPIENT_EMAIL    = os.environ.get("RECIPIENT_EMAIL", GMAIL_USER)
 #    Outlook/Hotmail: SMTP_HOST=smtp.office365.com  SMTP_PORT=587
 #    Yahoo:           SMTP_HOST=smtp.mail.yahoo.com SMTP_PORT=465
 #    Zoho:            SMTP_HOST=smtp.zoho.com       SMTP_PORT=465
-SMTP_HOST = os.environ.get("SMTP_HOST", "smtp.gmail.com")
-SMTP_PORT = int(os.environ.get("SMTP_PORT", "465"))
+SMTP_HOST = _env("SMTP_HOST", "smtp.gmail.com")
+try:
+    SMTP_PORT = int(_env("SMTP_PORT", "465"))
+except ValueError:
+    SMTP_PORT = 465
 
 # --- Time windows & politeness ----------------------------------------------
 NEWS_MAX_AGE_HOURS = 48      # news older than this is dropped
