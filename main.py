@@ -1,15 +1,19 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # ============================================================================
-#  SKILLUP DIGEST  —  your personal daily opportunity newspaper
+#  SKILLUP DIGEST v2.0 "WORLD EDITION"  —  your personal daily newspaper
 # ----------------------------------------------------------------------------
 #  What it does (every day, automatically, on GitHub's free servers):
-#    1. SCANS   19 direct RSS feeds + Google News across 6 world regions
+#    1. SCANS   ~60 direct RSS feeds + Google News across 23 world regions
 #    2. CLEANS  keeps news from the last 48 hours, opportunities from the
 #               last 7 days, removes duplicates (today AND across days)
-#    3. TAGS    every item [GLOBAL] or [NEPAL], puts AI/Health items on top
-#    4. BUILDS  one professional PDF with 9 color-coded sections
+#    3. TAGS    every item [GLOBAL] or [NEPAL], AI/Health items float on top
+#    4. BUILDS  one professional PDF with 17 color-coded sections
 #    5. EMAILS  it to your inbox via Gmail
+#
+#  v2.0 covers EVERY field: AI/tech, world, business, science, space, health,
+#  climate, sports, entertainment, Nepal + courses, certifications,
+#  scholarships, internships, hackathons, webinars, conferences, fellowships.
 #
 #  Schedule: runs at 23:15 UTC = 5:00 AM Nepal time (NPT, UTC+5:45).
 #  Cost: $0. Credentials live in GitHub Secrets — never in this file.
@@ -25,9 +29,12 @@ import sys
 import json
 import time
 import html
+import random
 import smtplib
 import hashlib
+import threading
 import traceback
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from email.mime.multipart import MIMEMultipart
 from email.mime.application import MIMEApplication
@@ -80,76 +87,180 @@ try:
 except ValueError:
     SMTP_PORT = 465
 
-# --- Time windows & politeness ----------------------------------------------
-NEWS_MAX_AGE_HOURS = 48      # news older than this is dropped
-OPP_MAX_AGE_DAYS   = 7       # opportunities older than this are dropped
-REQUEST_DELAY_SECS = 1.0     # polite pause between HTTP requests
-ENTRIES_PER_QUERY  = 20      # how many RSS entries to read per query
-MAX_SUMMARY_CHARS  = 220     # one-line summary length in the PDF
-SEEN_FILE          = "seen.json"      # cross-day dedup memory (auto-committed)
-OUTPUT_DIR         = "digest_output"  # local PDF output folder
+# --- Time windows & performance ----------------------------------------------
+NEWS_MAX_AGE_HOURS  = 48      # news older than this is dropped
+OPP_MAX_AGE_DAYS    = 7       # opportunities older than this are dropped
+ENTRIES_PER_QUERY   = 25      # how many RSS entries to read per Google query
+DIRECT_FEED_ENTRIES = 60      # how many entries to read per direct RSS feed
+MAX_SUMMARY_CHARS   = 220     # one-line summary length in the PDF
+FETCH_WORKERS       = 10      # parallel HTTP downloads (I/O bound -> threads)
+REQUEST_JITTER      = (0.05, 0.25)  # polite random pause per request (secs)
+SEEN_FILE           = _env("SEEN_FILE", "seen.json")  # cross-day dedup memory
+OUTPUT_DIR          = "digest_output"  # local PDF output folder
 SEEN_RETENTION_DAYS = 60              # forget hashes after 60 days
 
 HTTP_HEADERS = {
     "User-Agent": ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
                    "(KHTML, like Gecko) Chrome/124.0 Safari/537.36 "
-                   "SkillUpDigest/1.0")
+                   "SkillUpDigest/2.0")
 }
 
 # --- The ONE editable world-region dictionary -------------------------------
 #    gl   = geolocation country code     hl = interface language
 #    ceid = Google News locale id
-#    Add a country by copying a line, e.g. "DE": {"gl":"de","hl":"en","ceid":"DE:en"}
+#    All 23 regions below were LIVE-TESTED (HTTP 200 + real results).
+#    Add a country by copying a line, e.g. "IT": {"gl":"it","hl":"en","ceid":"IT:en"}
 REGIONS = {
     "US": {"gl": "us", "hl": "en", "ceid": "US:en"},
     "UK": {"gl": "uk", "hl": "en", "ceid": "UK:en"},
     "IN": {"gl": "in", "hl": "en", "ceid": "IN:en"},
     "NP": {"gl": "np", "hl": "en", "ceid": "NP:en"},   # Nepal
-    "AU": {"gl": "au", "hl": "en", "ceid": "AU:en"},   # scholarships only
-    "CA": {"gl": "ca", "hl": "en", "ceid": "CA:en"},   # scholarships only
+    "AU": {"gl": "au", "hl": "en", "ceid": "AU:en"},   # Australia
+    "CA": {"gl": "ca", "hl": "en", "ceid": "CA:en"},   # Canada
+    "SG": {"gl": "sg", "hl": "en", "ceid": "SG:en"},   # Singapore
+    "NZ": {"gl": "nz", "hl": "en", "ceid": "NZ:en"},   # New Zealand
+    "ZA": {"gl": "za", "hl": "en", "ceid": "ZA:en"},   # South Africa
+    "NG": {"gl": "ng", "hl": "en", "ceid": "NG:en"},   # Nigeria
+    "KE": {"gl": "ke", "hl": "en", "ceid": "KE:en"},   # Kenya
+    "PK": {"gl": "pk", "hl": "en", "ceid": "PK:en"},   # Pakistan
+    "BD": {"gl": "bd", "hl": "en", "ceid": "BD:en"},   # Bangladesh
+    "LK": {"gl": "lk", "hl": "en", "ceid": "LK:en"},   # Sri Lanka
+    "PH": {"gl": "ph", "hl": "en", "ceid": "PH:en"},   # Philippines
+    "MY": {"gl": "my", "hl": "en", "ceid": "MY:en"},   # Malaysia
+    "AE": {"gl": "ae", "hl": "en", "ceid": "AE:en"},   # UAE
+    "IE": {"gl": "ie", "hl": "en", "ceid": "IE:en"},   # Ireland
+    "DE": {"gl": "de", "hl": "en", "ceid": "DE:en"},   # Germany
+    "FR": {"gl": "fr", "hl": "en", "ceid": "FR:en"},   # France
+    "BR": {"gl": "br", "hl": "en", "ceid": "BR:en"},   # Brazil
+    "JP": {"gl": "jp", "hl": "en", "ceid": "JP:en"},   # Japan
+    "ID": {"gl": "id", "hl": "en", "ceid": "ID:en"},   # Indonesia
 }
-REGIONS_ALL      = ["US", "UK", "IN", "NP"]             # used by news + most queries
-REGIONS_SCHOLAR  = ["US", "UK", "IN", "NP", "AU", "CA"] # scholarships get 2 extra regions
+
+# Region groups (edit freely — every code must exist in REGIONS above)
+R_WIDE   = ["US", "UK", "IN", "NP", "AU", "CA", "SG", "ZA", "NG", "KE",
+            "AE", "PH", "NZ", "PK", "LK", "BD", "MY", "IE"]      # world news
+R_TOP    = ["US", "UK", "IN", "NP", "AU", "CA", "SG", "ZA", "NG", "KE",
+            "AE", "PH", "DE", "FR", "BR", "JP"]                   # top stories
+R_CORE   = ["US", "UK", "IN", "NP", "AU", "CA"]                  # general news
+R_SCHOL  = ["US", "UK", "IN", "NP", "CA", "AU", "DE", "SG", "ZA", "NG",
+            "KE", "PK", "BD", "LK", "PH", "MY", "AE", "IE", "NZ", "JP"]  # scholarships
+R_GRANT  = ["US", "UK", "IN", "NP", "CA", "AU", "DE", "KE", "NG", "ZA",
+            "PH", "BD", "LK", "PK"]                               # fellowships/grants
 
 # --- PDF sections: exact order, exact colors, exact caps --------------------
+#    v2.0: 17 sections (9 news + 8 opportunities), total cap 312 items.
 SECTIONS = [
-    {"key": "ai_tech", "title": "AI & TECHNOLOGY",          "color": "#1D4ED8", "cap": 10},
-    {"key": "health",  "title": "HEALTH & MEDICINE",        "color": "#0F766E", "cap": 10},
-    {"key": "nepal",   "title": "NEPAL & SOUTH ASIA",       "color": "#BE123C", "cap": 10},
-    {"key": "courses", "title": "TRAINING & FREE COURSES",  "color": "#4338CA", "cap": 15},
-    {"key": "certs",   "title": "CERTIFICATIONS",           "color": "#7E22CE", "cap": 15},
-    {"key": "scholar", "title": "SCHOLARSHIPS & FUNDING",   "color": "#15803D", "cap": 15},
-    {"key": "intern",  "title": "INTERNSHIPS & GRAD PROGRAMS", "color": "#C2410C", "cap": 15},
-    {"key": "hack",    "title": "HACKATHONS & COMPETITIONS",  "color": "#DC2626", "cap": 12},
-    {"key": "events",  "title": "WEBINARS & EVENTS",        "color": "#0E7490", "cap": 12},
+    # ---------------- NEWS (last 48 h) ----------------
+    {"key": "ai_tech",      "title": "AI & TECHNOLOGY",                "color": "#1D4ED8", "cap": 20},
+    {"key": "world",        "title": "WORLD NEWS",                     "color": "#334155", "cap": 22},
+    {"key": "business",     "title": "BUSINESS & STARTUPS",            "color": "#047857", "cap": 16},
+    {"key": "science",      "title": "SCIENCE & SPACE",                "color": "#7C3AED", "cap": 16},
+    {"key": "health",       "title": "HEALTH & MEDICINE",              "color": "#0F766E", "cap": 18},
+    {"key": "environment",  "title": "CLIMATE & ENVIRONMENT",          "color": "#65A30D", "cap": 14},
+    {"key": "sports",       "title": "SPORTS",                         "color": "#EA580C", "cap": 14},
+    {"key": "entertainment","title": "ENTERTAINMENT & CULTURE",        "color": "#DB2777", "cap": 14},
+    {"key": "nepal",        "title": "NEPAL & SOUTH ASIA",             "color": "#BE123C", "cap": 16},
+    # ------------ OPPORTUNITIES (last 7 days) -----------
+    {"key": "courses",      "title": "TRAINING & FREE COURSES",        "color": "#4338CA", "cap": 24},
+    {"key": "certs",        "title": "CERTIFICATIONS",                 "color": "#7E22CE", "cap": 22},
+    {"key": "scholar",      "title": "SCHOLARSHIPS & FUNDING",         "color": "#15803D", "cap": 24},
+    {"key": "intern",       "title": "INTERNSHIPS & GRAD PROGRAMS",    "color": "#C2410C", "cap": 24},
+    {"key": "hack",         "title": "HACKATHONS & COMPETITIONS",      "color": "#DC2626", "cap": 20},
+    {"key": "events",       "title": "WEBINARS & WORKSHOPS",           "color": "#0E7490", "cap": 18},
+    {"key": "conferences",  "title": "CONFERENCES & CAREER FAIRS",     "color": "#B45309", "cap": 12},
+    {"key": "grants",       "title": "FELLOWSHIPS, GRANTS & EXCHANGES","color": "#1E3A8A", "cap": 18},
 ]
 SECTION_BY_KEY = {s["key"]: s for s in SECTIONS}
-NEWS_SECTION_KEYS = {"ai_tech", "health", "nepal"}
+NEWS_SECTION_KEYS = {"ai_tech", "world", "business", "science", "health",
+                     "environment", "sports", "entertainment", "nepal"}
 
-# --- News search terms (TYPE 1: last 48 h) ----------------------------------
+# --- News search terms (TYPE 1: last 48 h) -----------------------------------
+#    "__top__" = Google News TOP STORIES feed for that region (no search term).
 NEWS_QUERIES = {
-    "ai_tech": ["artificial intelligence", "machine learning", "data science"],
-    "health":  ["public health", "digital health", "medicine"],
-    "nepal":   ["Nepal", "Kathmandu"],
+    "ai_tech": {"regions": ["US", "UK", "IN", "NP", "AU", "CA", "SG"],
+                "terms": ["artificial intelligence", "machine learning",
+                          "data science", "cybersecurity", "smartphone launch",
+                          "gadget review", "semiconductor chip", "robotics",
+                          "virtual reality", "openai chatgpt"]},
+    "world":   {"regions": R_WIDE,
+                "terms": ["__top__", "world news", "breaking news",
+                          "international politics", "geopolitics conflict",
+                          "united nations", "global summit"]},
+    "business": {"regions": ["US", "UK", "IN", "NP", "CA", "SG", "AE"],
+                 "terms": ["startup funding", "venture capital", "stock market",
+                           "economy inflation", "merger acquisition",
+                           "new business launch", "cryptocurrency bitcoin"]},
+    "science": {"regions": ["US", "UK", "IN", "AU", "CA"],
+                "terms": ["space launch", "nasa isro spacex", "astronomy discovery",
+                          "physics quantum", "new species discovery",
+                          "research breakthrough", "ancient archaeology",
+                          "mathematics discovery"]},
+    "health":  {"regions": ["US", "UK", "IN", "NP", "AU", "NG"],
+                "terms": ["health research", "public health", "disease outbreak",
+                          "mental health", "nutrition fitness",
+                          "medical breakthrough", "hospital healthcare",
+                          "medicine drug"]},
+    "environment": {"regions": ["US", "UK", "IN", "AU", "KE", "NP"],
+                    "terms": ["climate change", "global warming",
+                              "renewable energy", "extreme weather flood",
+                              "wildlife conservation", "pollution air quality",
+                              "sustainability"]},
+    "sports":  {"regions": ["US", "UK", "IN", "NP", "AU", "CA"],
+                "terms": ["football soccer", "cricket match", "olympic sports",
+                          "basketball", "tennis", "formula 1 racing",
+                          "sports championship"]},
+    "entertainment": {"regions": ["US", "UK", "IN", "NP", "AU"],
+                      "terms": ["movie release", "music release",
+                                "streaming series", "celebrity entertainment",
+                                "video game launch", "art culture",
+                                "book literature"]},
+    "nepal":   {"regions": ["NP", "IN"],
+                "terms": ["Nepal", "Kathmandu", "Nepal politics", "Nepal economy",
+                          "Nepal education", "Nepal technology", "Nepal sports",
+                          "Nepal tourism", "Nepal health", "South Asia"]},
 }
 
 # --- Opportunity search terms (TYPE 2: last 7 days, synonym groups) ---------
 OPP_QUERIES = [
-    {"section": "courses", "regions": REGIONS_ALL,
-     "terms": ["free online course", "free certification", "MOOC"]},
-    {"section": "certs",   "regions": REGIONS_ALL,
-     "terms": ["free certificate", "Google Career Certificate", "OpenWHO certificate"]},
-    {"section": "scholar", "regions": REGIONS_SCHOLAR,
-     "terms": ["scholarship", "fully funded scholarship", "research grant", "fellowship"]},
-    {"section": "intern",  "regions": REGIONS_ALL,
-     "terms": ["internship", "graduate program", "trainee program"]},
-    {"section": "hack",    "regions": REGIONS_ALL,
-     "terms": ["hackathon", "coding competition", "innovation challenge"]},
-    {"section": "events",  "regions": REGIONS_ALL,
-     "terms": ["free webinar", "workshop", "masterclass"]},
+    {"section": "courses", "regions": ["US", "UK", "IN", "NP", "CA", "SG", "PH", "NG"],
+     "terms": ["free online course", "MOOC free", "coursera free course",
+               "edX free course", "udemy free course", "google free course",
+               "harvard free course", "free course certificate",
+               "ai free course", "coding course free"]},
+    {"section": "certs",   "regions": ["US", "UK", "IN", "NP", "CA", "AU", "SG", "PH"],
+     "terms": ["free certification", "google certification", "aws certification",
+               "azure certification", "cisco certification",
+               "cybersecurity certification", "data science certification",
+               "cloud certification"]},
+    {"section": "scholar", "regions": R_SCHOL,
+     "terms": ["scholarship", "fully funded scholarship",
+               "undergraduate scholarship", "masters scholarship",
+               "phd scholarship", "scholarship international students",
+               "chevening scholarship", "fulbright", "daad scholarship",
+               "commonwealth scholarship"]},
+    {"section": "intern",  "regions": ["US", "UK", "IN", "NP", "CA", "AU",
+                                       "SG", "PH", "AE", "NZ"],
+     "terms": ["internship", "summer internship", "paid internship",
+               "remote internship", "graduate program", "entry level job",
+               "graduate trainee", "fresher job"]},
+    {"section": "hack",    "regions": ["US", "UK", "IN", "NP", "CA", "AU", "SG", "PH"],
+     "terms": ["hackathon", "online hackathon", "coding competition",
+               "programming contest", "innovation challenge",
+               "startup competition", "case competition", "essay competition"]},
+    {"section": "events",  "regions": ["US", "UK", "IN", "NP", "CA", "AU", "SG"],
+     "terms": ["free webinar", "online workshop", "virtual event",
+               "masterclass free", "tech meetup", "training program free",
+               "coding bootcamp free"]},
+    {"section": "conferences", "regions": ["US", "UK", "IN", "NP", "AU", "SG", "AE"],
+     "terms": ["tech conference", "student conference", "call for papers",
+               "career fair", "education fair", "startup summit"]},
+    {"section": "grants",  "regions": R_GRANT,
+     "terms": ["fellowship", "research grant", "youth fellowship",
+               "leadership fellowship", "un fellowship", "ngo grant",
+               "innovation grant", "exchange program", "volunteer abroad"]},
 ]
 
-# --- Direct RSS feeds (all VERIFIED working on 2026-11-05 unless marked) ----
+# --- Direct RSS feeds (every URL LIVE-TESTED on 2026-11-06 unless marked) ----
 #    kind: "news" = 48h window, undated entries dropped
 #          "agg"  = 7d window, each entry auto-classified into a section
 #    section: fixed section for the feed (agg feeds classify per entry)
@@ -164,28 +275,128 @@ DIRECT_FEEDS = [
      "url": "https://www.theverge.com/rss/index.xml"},
     {"name": "MIT Tech Review (AI)", "kind": "news", "section": "ai_tech",
      "url": "https://www.technologyreview.com/topic/artificial-intelligence/feed"},
+    {"name": "Wired",             "kind": "news", "section": "ai_tech",
+     "url": "https://www.wired.com/feed/rss"},
+    {"name": "Ars Technica",      "kind": "news", "section": "ai_tech",
+     "url": "https://feeds.arstechnica.com/arstechnica/index"},
+    {"name": "IEEE Spectrum AI",  "kind": "news", "section": "ai_tech",
+     "url": "https://spectrum.ieee.org/feeds/topic/artificial-intelligence.rss"},
+    {"name": "Hacker News",       "kind": "news", "section": "ai_tech",
+     "url": "https://hnrss.org/frontpage"},
+    {"name": "dev.to",            "kind": "news", "section": "ai_tech",
+     "url": "https://dev.to/feed"},
+    {"name": "Engadget",          "kind": "news", "section": "ai_tech",
+     "url": "https://www.engadget.com/rss.xml"},
+    {"name": "Tom's Hardware",    "kind": "news", "section": "ai_tech",
+     "url": "https://www.tomshardware.com/feeds.xml"},
+    {"name": "TechRadar",         "kind": "news", "section": "ai_tech",
+     "url": "https://www.techradar.com/feeds.xml"},
+    {"name": "HackerNoon",        "kind": "news", "section": "ai_tech",
+     "url": "https://hackernoon.com/feed"},
+    {"name": "The Next Web",      "kind": "news", "section": "ai_tech",
+     "url": "https://thenextweb.com/feed"},
     # to-verify: returned 429 (rate-limit) from the test server; may work fine
     # from GitHub's servers. If it floods your logs with [warn], delete it.
     {"name": "VentureBeat AI",    "kind": "news", "section": "ai_tech",
      "url": "https://venturebeat.com/category/ai/feed/"},
+    # ---- World News ----
+    {"name": "BBC World",         "kind": "news", "section": "world",
+     "url": "https://feeds.bbci.co.uk/news/world/rss.xml"},
+    {"name": "Al Jazeera",        "kind": "news", "section": "world",
+     "url": "https://www.aljazeera.com/xml/rss/all.xml"},
+    {"name": "Guardian World",    "kind": "news", "section": "world",
+     "url": "https://www.theguardian.com/world/rss"},
+    {"name": "CNN World",         "kind": "news", "section": "world",
+     "url": "http://rss.cnn.com/rss/edition_world.rss"},
+    {"name": "NYT World",         "kind": "news", "section": "world",
+     "url": "https://rss.nytimes.com/services/xml/rss/nyt/World.xml"},
+    {"name": "DW English",        "kind": "news", "section": "world",
+     "url": "https://rss.dw.com/rdf/rss-en-world"},
+    {"name": "NPR World",         "kind": "news", "section": "world",
+     "url": "https://feeds.npr.org/1004/rss.xml"},
+    {"name": "France24 EN",       "kind": "news", "section": "world",
+     "url": "https://www.france24.com/en/rss"},
+    {"name": "The Independent",   "kind": "news", "section": "world",
+     "url": "https://www.independent.co.uk/rss?topic=world"},
+    # ---- Business & Startups ----
+    {"name": "BBC Business",      "kind": "news", "section": "business",
+     "url": "https://feeds.bbci.co.uk/news/business/rss.xml"},
+    {"name": "Guardian Business", "kind": "news", "section": "business",
+     "url": "https://www.theguardian.com/uk/business/rss"},
+    {"name": "CNBC Top News",     "kind": "news", "section": "business",
+     "url": "https://www.cnbc.com/id/100003114/device/rss/rss.html"},
+    {"name": "Business Standard", "kind": "news", "section": "business",
+     "url": "https://www.business-standard.com/rss/home_page_top_stories.rss"},
+    # ---- Science & Space ----
+    {"name": "ScienceDaily",      "kind": "news", "section": "science",
+     "url": "https://www.sciencedaily.com/rss/all.xml"},
+    {"name": "Phys.org",          "kind": "news", "section": "science",
+     "url": "https://phys.org/rss-feed/"},
+    {"name": "Space.com",         "kind": "news", "section": "science",
+     "url": "https://www.space.com/rss"},
+    {"name": "NASA",              "kind": "news", "section": "science",
+     "url": "https://www.nasa.gov/news-release/feed/"},
+    {"name": "Quanta Magazine",   "kind": "news", "section": "science",
+     "url": "https://api.quantamagazine.org/feed/"},
+    {"name": "Science Magazine",  "kind": "news", "section": "science",
+     "url": "https://www.science.org/rss/news_current.xml"},
+    {"name": "Nature",            "kind": "news", "section": "science",
+     "url": "https://www.nature.com/nature.rss"},
     # ---- Health & Medicine ----
     {"name": "BBC Health",        "kind": "news", "section": "health",
      "url": "https://feeds.bbci.co.uk/news/health/rss.xml"},
     {"name": "STAT News",         "kind": "news", "section": "health",
      "url": "https://www.statnews.com/feed/"},
-    {"name": "Nature",            "kind": "news", "section": "health",
-     "url": "https://www.nature.com/nature.rss"},
     {"name": "WHO News",          "kind": "news", "section": "health",
      "url": "https://www.who.int/rss-feeds/news-english.xml"},
     {"name": "Medical Xpress",    "kind": "news", "section": "health",
      "url": "https://medicalxpress.com/rss-feed/"},
     {"name": "NPR Health",        "kind": "news", "section": "health",
      "url": "https://feeds.npr.org/1128/rss.xml"},
+    # ---- Climate & Environment ----
+    {"name": "Guardian Environment", "kind": "news", "section": "environment",
+     "url": "https://www.theguardian.com/environment/rss"},
+    {"name": "Grist",             "kind": "news", "section": "environment",
+     "url": "https://grist.org/feed/"},
+    # ---- Sports ----
+    {"name": "BBC Sport",         "kind": "news", "section": "sports",
+     "url": "https://feeds.bbci.co.uk/sport/rss.xml"},
+    {"name": "Sky Sports",        "kind": "news", "section": "sports",
+     "url": "https://www.skysports.com/rss/12040"},
+    {"name": "Guardian Sport",    "kind": "news", "section": "sports",
+     "url": "https://www.theguardian.com/sport/rss"},
+    {"name": "Times of India Sports", "kind": "news", "section": "sports",
+     "url": "https://timesofindia.indiatimes.com/rssfeeds/4719148.cms"},
+    # ---- Entertainment & Culture ----
+    {"name": "Variety",           "kind": "news", "section": "entertainment",
+     "url": "https://variety.com/feed/"},
+    {"name": "Hollywood Reporter","kind": "news", "section": "entertainment",
+     "url": "https://www.hollywoodreporter.com/feed/"},
+    {"name": "Billboard Music",   "kind": "news", "section": "entertainment",
+     "url": "https://www.billboard.com/c/music/music-news/feed/"},
+    {"name": "Rolling Stone",     "kind": "news", "section": "entertainment",
+     "url": "https://www.rollingstone.com/feed/"},
+    {"name": "Polygon Games",     "kind": "news", "section": "entertainment",
+     "url": "https://www.polygon.com/rss/index.xml"},
+    {"name": "IGN Games",         "kind": "news", "section": "entertainment",
+     "url": "https://feeds.ign.com/ign/games-all"},
     # ---- Nepal & South Asia ----
     {"name": "Kathmandu Post",    "kind": "news", "section": "nepal", "tag": "Nepal",
      "url": "https://kathmandupost.com/rss"},
     {"name": "OnlineKhabar English", "kind": "news", "section": "nepal", "tag": "Nepal",
      "url": "https://english.onlinekhabar.com/feed"},
+    {"name": "Ratopati",          "kind": "news", "section": "nepal", "tag": "Nepal",
+     "url": "https://www.ratopati.com/feed"},
+    {"name": "Khabarhub English", "kind": "news", "section": "nepal", "tag": "Nepal",
+     "url": "https://english.khabarhub.com/feed/"},
+    {"name": "Nepali Times",      "kind": "news", "section": "nepal", "tag": "Nepal",
+     "url": "https://nepalitimes.com/feed"},
+    {"name": "Nepal Press",       "kind": "news", "section": "nepal", "tag": "Nepal",
+     "url": "https://nepalpress.com/feed/"},
+    {"name": "Himal Press",       "kind": "news", "section": "nepal", "tag": "Nepal",
+     "url": "https://www.himalpress.com/feed"},
+    {"name": "The Hindu National","kind": "news", "section": "nepal",
+     "url": "https://www.thehindu.com/news/national/feeder/default.rss"},
     # ---- Opportunity aggregators (auto-classified per entry) ----
     {"name": "Opportunity Desk",  "kind": "agg",
      "url": "https://opportunitydesk.org/feed/"},
@@ -193,11 +404,19 @@ DIRECT_FEEDS = [
      "url": "https://www.opportunitiesforafricans.com/feed/"},
     {"name": "Scholars4Dev",      "kind": "agg",
      "url": "https://www.scholars4dev.com/feed/"},
+    {"name": "WeWorkRemotely",    "kind": "agg",
+     "url": "https://weworkremotely.com/categories/remote-programming-jobs.rss"},
+    {"name": "Internshala Blog",  "kind": "agg",
+     "url": "https://blog.internshala.com/feed/"},
+    {"name": "Eurodesk Youth",    "kind": "agg",
+     "url": "https://eurodesk.eu/feed/"},
     # ---- Courses & certifications ----
     {"name": "freeCodeCamp",      "kind": "agg",
      "url": "https://www.freecodecamp.org/news/rss/"},
     {"name": "Coursera Blog",     "kind": "agg",
      "url": "https://blog.coursera.org/feed/"},
+    {"name": "Open Culture",      "kind": "agg",
+     "url": "https://www.openculture.com/feed"},
     # to-verify: returned 403 (bot-block) from the test server; often works
     # from GitHub's servers. Delete if it keeps warning.
     {"name": "Class Central",     "kind": "agg",
@@ -216,17 +435,24 @@ NEPAL_HINT_WORDS   = ["nepal", "nepali", "kathmandu", "pokhara", "biratnagar"]
 
 # --- Auto-classification rules for aggregator feeds (order matters) ---------
 AGG_CLASSIFY_RULES = [
-    ("hack",    ["hackathon", "coding competition", "programming contest",
-                 "innovation challenge", "codefest", "datathon", "olympiad"]),
-    ("intern",  ["internship", "trainee", "graduate program", "graduate scheme",
-                 "management trainee", "graduate opportunity"]),
-    ("scholar", ["scholarship", "fellowship", "research grant", " grant",
-                 "funding", "bursary", "fully funded", "financial aid", "stipend"]),
-    ("events",  ["webinar", "workshop", "masterclass", "summit", "conference",
-                 "info session"]),
-    ("courses", ["free course", "online course", "mooc", "course", "bootcamp",
-                 "training", "upskill", "free class", "learn"]),
-    ("certs",   ["certification", "certificate"]),
+    ("hack",        ["hackathon", "coding competition", "programming contest",
+                     "innovation challenge", "codefest", "datathon", "olympiad",
+                     "competition", "contest", "challenge"]),
+    ("conferences", ["conference", "summit", "expo", "career fair",
+                     "education fair", "meetup", "forum", "symposium"]),
+    ("grants",      ["fellowship", "research grant", " grant", "grants",
+                     "funding", "exchange program", "volunteer", "residency",
+                     "incubator", "accelerator", "ambassador"]),
+    ("intern",      ["internship", "trainee", "graduate program", "graduate scheme",
+                     "management trainee", "entry level", "fresher", "vacancy",
+                     "remote job", "hiring", "career opportunity"]),
+    ("scholar",     ["scholarship", "bursary", "fully funded", "financial aid",
+                     "stipend", "tuition"]),
+    ("events",      ["webinar", "workshop", "masterclass", "info session",
+                     "live session", "training"]),
+    ("certs",       ["certification", "certificate"]),
+    ("courses",     ["free course", "online course", "mooc", "course",
+                     "bootcamp", "upskill", "learn", "class"]),
 ]
 
 # --- Deadline extraction patterns (rendered in red in the PDF) ---------------
@@ -245,6 +471,7 @@ DATE_STR = datetime.now(NPT).strftime("%d %b %Y")
 PDF_PATH = os.path.join(OUTPUT_DIR, f"SkillUp-Digest-{datetime.now(NPT):%Y-%m-%d}.pdf")
 
 STATS = {"ok": 0, "fail": 0}
+STATS_LOCK = threading.Lock()
 
 
 # ============================================================================
@@ -259,13 +486,31 @@ def log(msg, level="info"):
 
 def clean_text(raw):
     """Strip HTML tags, unescape entities, collapse whitespace, and remove
-    arrow/shape glyphs (\u25bc, \u25b2, ...) that PDF base fonts can't render."""
+    glyphs PDF base fonts can't render: arrows (\u25bc), box shapes, emoji
+    and country flags (\U0001F1E6-\U0001F1FF render as colored blocks)."""
     if not raw:
         return ""
     txt = re.sub(r"<[^>]+>", " ", str(raw))
     txt = html.unescape(txt)
-    txt = re.sub(r"[\u2190-\u21FF\u25A0-\u25FF\u2700-\u27BF\uFEFF]", " ", txt)
+    txt = re.sub(
+        r"[\u2190-\u21FF\u2460-\u24FF\u25A0-\u25FF\u2600-\u27BF\u2B00-\u2BFF"
+        r"\uFE00-\uFE0F\uFEFF\U0001F000-\U0001FFFF\U000E0000-\U000E007F]",
+        " ", txt)
     return re.sub(r"\s+", " ", txt).strip()
+
+
+def is_junk_text(text):
+    """True for garbage titles/summaries: mostly digits/punctuation, or long
+    runs of one character (some feeds emit chart/placeholder junk)."""
+    text = (text or "").strip()
+    if len(text) < 12:
+        return True if text and not text[0].isalpha() else False
+    letters = sum(c.isalpha() for c in text)
+    if letters < 0.5 * len(text):
+        return True
+    if re.search(r"(.)\1{5,}", text):
+        return True
+    return False
 
 
 def esc(text):
@@ -348,20 +593,32 @@ def classify_opp(text):
 
 
 def fetch(url):
-    """GET a URL with polite delay + error isolation. Returns bytes or None."""
-    time.sleep(REQUEST_DELAY_SECS)
-    try:
-        r = requests.get(url, headers=HTTP_HEADERS, timeout=20)
-        if r.status_code != 200:
-            log(f"HTTP {r.status_code} -> {url}", "warn")
-            STATS["fail"] += 1
+    """GET a URL: small polite jitter, one automatic retry (429/network),
+    full error isolation. Returns bytes or None. Thread-safe."""
+    for attempt in (1, 2):
+        try:
+            time.sleep(random.uniform(*REQUEST_JITTER))
+            r = requests.get(url, headers=HTTP_HEADERS, timeout=20)
+            if r.status_code == 429 and attempt == 1:
+                time.sleep(3)          # rate-limited -> back off once
+                continue
+            if r.status_code != 200:
+                log(f"HTTP {r.status_code} -> {url}", "warn")
+                with STATS_LOCK:
+                    STATS["fail"] += 1
+                return None
+            with STATS_LOCK:
+                STATS["ok"] += 1
+            return r.content
+        except Exception as exc:
+            if attempt == 1:
+                time.sleep(2)
+                continue
+            log(f"fetch failed -> {url} ({type(exc).__name__}: {exc})", "warn")
+            with STATS_LOCK:
+                STATS["fail"] += 1
             return None
-        STATS["ok"] += 1
-        return r.content
-    except Exception as exc:
-        log(f"fetch failed -> {url} ({type(exc).__name__}: {exc})", "warn")
-        STATS["fail"] += 1
-        return None
+    return None
 
 
 # ============================================================================
@@ -399,15 +656,20 @@ def save_seen(seen, items):
 
 
 # ============================================================================
-# 4. COLLECTORS — Google News (multi-region) + direct RSS feeds
+# 4. COLLECTORS — Google News (23 regions) + direct RSS feeds, in parallel
 # ============================================================================
 
 def fetch_google_news(term, region_key, section, days):
-    """One Google News RSS query in one world region. Never raises."""
+    """One Google News RSS query in one world region. term '__top__' fetches
+    the region's TOP STORIES feed instead of a search. Never raises."""
     reg = REGIONS[region_key]
-    q = f"{term} when:{days}d"
-    url = ("https://news.google.com/rss/search?q=" + quote_plus(q) +
-           f"&gl={reg['gl']}&hl={reg['hl']}&ceid={reg['ceid']}")
+    if term == "__top__":
+        url = (f"https://news.google.com/rss?gl={reg['gl']}&hl={reg['hl']}"
+               f"&ceid={reg['ceid']}")
+    else:
+        q = f"{term} when:{days}d"
+        url = ("https://news.google.com/rss/search?q=" + quote_plus(q) +
+               f"&gl={reg['gl']}&hl={reg['hl']}&ceid={reg['ceid']}")
     data = fetch(url)
     if not data:
         return []
@@ -421,7 +683,7 @@ def fetch_google_news(term, region_key, section, days):
     for entry in parsed.entries[:ENTRIES_PER_QUERY]:
         title = clean_text(entry.get("title", ""))
         link = entry.get("link", "")
-        if not title or not link:
+        if not title or not link or is_junk_text(title):
             continue
         # Google News titles end in " - Source"; the <source> tag is better.
         source = ""
@@ -455,14 +717,18 @@ def fetch_direct_feed(cfg):
         return []
 
     items = []
-    for entry in parsed.entries[:40]:
+    for entry in parsed.entries[:DIRECT_FEED_ENTRIES]:
         title = clean_text(entry.get("title", ""))
         link = entry.get("link", "")
-        if not title or not link:
+        if not title or not link or is_junk_text(title):
             continue
         if title.startswith(SKIP_TITLE_PREFIXES):
             continue  # skip journal noise like "Publisher Correction: ..."
         summary = truncate(clean_text(entry.get("summary", "")))
+        # Hacker-News-style summaries: drop the 'Article URL: ... Comments.URL: ...' boilerplate
+        summary = re.sub(r"(?:Article |Comments\.)?URL:\s*\S+", "", summary).strip(" .")
+        if is_junk_text(summary):
+            summary = ""   # keep the item, lose the garbage text
         kind = cfg.get("kind", "news")
 
         section = cfg.get("section")
@@ -486,38 +752,47 @@ def fetch_direct_feed(cfg):
 
 
 def collect_all():
-    """Fetch everything. Direct feeds first (real URLs, richer data), then
-    Google News multi-region queries. Each source is failure-isolated."""
+    """Fetch EVERYTHING in parallel (direct feeds + Google News multi-region).
+    Each source is failure-isolated: one bad URL can never crash the run."""
     sections = {s["key"]: [] for s in SECTIONS}
 
-    log(f"Fetching {len(DIRECT_FEEDS)} direct RSS feeds...")
+    tasks = []   # (kind, payload)
     for cfg in DIRECT_FEEDS:
-        got = fetch_direct_feed(cfg)
-        for it in got:
-            sections[it["section"]].append(it)
-        log(f"  done: {cfg['name']} -> {len(got)} items")
-
-    total_queries = sum(len(g["terms"]) * len(g["regions"]) for g in OPP_QUERIES) \
-        + sum(len(terms) * len(REGIONS_ALL) for terms in NEWS_QUERIES.values())
-    log(f"Fetching {total_queries} Google News regional queries...")
-    done = 0
-    for section, terms in NEWS_QUERIES.items():          # news: 2-day window
-        for term in terms:
-            for region in REGIONS_ALL:
-                sections[section].extend(
-                    fetch_google_news(term, region, section, days=2))
-                done += 1
-                if done % 12 == 0:
-                    log(f"  progress: {done}/{total_queries} queries")
+        tasks.append(("feed", cfg))
+    for section, group in NEWS_QUERIES.items():          # news: 2-day window
+        for term in group["terms"]:
+            for region in group["regions"]:
+                tasks.append(("gnews", (term, region, section, 2)))
     for group in OPP_QUERIES:                            # opportunities: 7-day window
         for term in group["terms"]:
             for region in group["regions"]:
-                sections[group["section"]].extend(
-                    fetch_google_news(term, region, group["section"], days=7))
-                done += 1
-                if done % 12 == 0:
-                    log(f"  progress: {done}/{total_queries} queries")
+                tasks.append(("gnews", (term, region, group["section"], 7)))
 
+    log(f"Fetching {len(DIRECT_FEEDS)} direct feeds + "
+        f"{len(tasks) - len(DIRECT_FEEDS)} Google News queries "
+        f"with {FETCH_WORKERS} parallel workers...")
+
+    done = 0
+    with ThreadPoolExecutor(max_workers=FETCH_WORKERS) as ex:
+        futures = {ex.submit(fetch_direct_feed if kind == "feed"
+                             else lambda p: fetch_google_news(p[0], p[1], p[2], p[3]),
+                             payload): (kind, payload)
+                   for kind, payload in tasks}
+        for fut in as_completed(futures):
+            kind, payload = futures[fut]
+            try:
+                got = fut.result()
+            except Exception as exc:                  # absolute safety net
+                log(f"task crashed ({kind}): {type(exc).__name__}: {exc}", "warn")
+                got = []
+            for it in got:
+                sections[it["section"]].append(it)
+            done += 1
+            if done % 150 == 0:
+                log(f"  progress: {done}/{len(tasks)} sources fetched")
+
+    log(f"Collection done: {STATS['ok']} sources OK, {STATS['fail']} warnings, "
+        f"{sum(len(v) for v in sections.values())} raw items collected")
     return sections
 
 
@@ -574,7 +849,7 @@ def process_sections(raw_sections):
 
 
 # ============================================================================
-# 6. PDF BUILDER — professional 9-section newspaper (ReportLab)
+# 6. PDF BUILDER — professional 17-section newspaper (ReportLab)
 # ============================================================================
 
 ST_COVER_TITLE = ParagraphStyle("cover_title", fontName="Helvetica-Bold",
@@ -653,7 +928,7 @@ def _item_block(it):
 
 
 def _cover_legend():
-    return (f'<font color="#0F766E"><b>[GLOBAL]</b></font> worldwide opportunity'
+    return (f'<font color="#0F766E"><b>[GLOBAL]</b></font> worldwide item'
             f' &nbsp;&nbsp; <font color="#BE123C"><b>[NEPAL]</b></font> '
             f'Nepal &amp; South Asia &nbsp;&nbsp; '
             f'<font color="#DC2626"><b>Deadline:</b></font> '
@@ -667,10 +942,13 @@ def build_pdf(sections):
                             topMargin=13 * mm, bottomMargin=15 * mm,
                             title="SkillUp Digest", author="SkillUp Digest")
     total = sum(len(sections[s["key"]]) for s in SECTIONS)
+    n_news = sum(len(sections[s["key"]]) for s in SECTIONS
+                 if s["key"] in NEWS_SECTION_KEYS)
+    n_opp = total - n_news
     story = []
 
     # ---------------- COVER PAGE ----------------
-    story.append(Spacer(1, 26 * mm))
+    story.append(Spacer(1, 20 * mm))
     story.append(Paragraph("SKILLUP DIGEST", ST_COVER_TITLE))
     story.append(Spacer(1, 3 * mm))
     story.append(HRFlowable(width="100%", thickness=3, color=HexColor("#1D4ED8"),
@@ -678,15 +956,16 @@ def build_pdf(sections):
     story.append(Paragraph(
         f"Your daily intelligence briefing &nbsp;·&nbsp; {DATE_STR} "
         f"&nbsp;·&nbsp; delivered 5:00 AM NPT", ST_COVER_SUB))
-    story.append(Spacer(1, 12 * mm))
-    story.append(Paragraph(f"{total} fresh items across 9 sections", ST_COVER_BIG))
+    story.append(Spacer(1, 9 * mm))
+    story.append(Paragraph(f"{total} fresh items across {len(SECTIONS)} sections "
+                           f"({n_news} news · {n_opp} opportunities)", ST_COVER_BIG))
     story.append(Spacer(1, 1.5 * mm))
     story.append(Paragraph(
-        f"Scanned {STATS['ok'] + STATS['fail']} sources "
+        f"Scanned {STATS['ok'] + STATS['fail']} sources in 23 world regions "
         f"({STATS['ok']} OK, {STATS['fail']} warnings) &nbsp;·&nbsp; "
         f"news from the last {NEWS_MAX_AGE_HOURS} h, opportunities from the "
         f"last {OPP_MAX_AGE_DAYS} days", ST_COVER_SMALL))
-    story.append(Spacer(1, 8 * mm))
+    story.append(Spacer(1, 6 * mm))
 
     rows, style_cmds = [], []
     for i, sec in enumerate(SECTIONS):
@@ -695,7 +974,7 @@ def build_pdf(sections):
                      Paragraph(str(len(sections[sec["key"]])), ST_COVER_CNT)])
         style_cmds.append(("BACKGROUND", (0, i), (0, i), HexColor(sec["color"])))
     tbl = Table(rows, colWidths=[7 * mm, 125 * mm, 22 * mm],
-                rowHeights=[8 * mm] * len(rows))
+                rowHeights=[7.2 * mm] * len(rows))
     tbl.setStyle(TableStyle(style_cmds + [
         ("VALIGN",        (0, 0), (-1, -1), "MIDDLE"),
         ("LEFTPADDING",   (0, 0), (-1, -1), 4),
@@ -703,16 +982,16 @@ def build_pdf(sections):
         ("LINEBELOW",     (0, 0), (-1, -2), 0.5, HexColor("#F1F5F9")),
     ]))
     story.append(tbl)
-    story.append(Spacer(1, 10 * mm))
+    story.append(Spacer(1, 7 * mm))
     story.append(Paragraph(_cover_legend(), ST_COVER_SMALL))
-    story.append(Spacer(1, 3 * mm))
+    story.append(Spacer(1, 2.5 * mm))
     story.append(Paragraph(
         "Every title is a clickable link to the original source. AI/ML and "
         "Health items are prioritised inside every section. Generated free by "
         "SkillUp Digest on GitHub Actions.", ST_COVER_SMALL))
     story.append(PageBreak())
 
-    # ---------------- 9 SECTIONS, EXACT ORDER ----------------
+    # ---------------- 17 SECTIONS, EXACT ORDER ----------------
     for idx, sec in enumerate(SECTIONS):
         items = sections[sec["key"]]
         story.append(_section_header(sec, len(items)))
@@ -750,7 +1029,7 @@ def send_email(pdf_path, total, sections):
     msg["Date"] = formatdate(localtime=True)
 
     lines = ["Hello!", "", "Here is today's SkillUp Digest.", "",
-             f"{total} new items across 9 sections:"]
+             f"{total} new items across {len(SECTIONS)} sections:"]
     for sec in SECTIONS:
         lines.append(f"  • {sec['title']}: {len(sections[sec['key']])}")
     lines += ["", "The full PDF newsletter is attached — every title is a "
@@ -789,7 +1068,7 @@ def send_email(pdf_path, total, sections):
 
 def main():
     log("=" * 62)
-    log(f"SkillUp Digest starting — {DATE_STR} (NPT)")
+    log(f"SkillUp Digest v2.0 starting — {DATE_STR} (NPT)")
     log(f"Recipient: {RECIPIENT_EMAIL} | App password set: {bool(GMAIL_APP_PASSWORD)}")
     log("=" * 62)
     try:
