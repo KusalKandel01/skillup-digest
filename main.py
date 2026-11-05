@@ -54,7 +54,10 @@ from reportlab.platypus.flowables import HRFlowable
 # GMAIL_APP_PASSWORD is a 16-character App Password — set it as a GitHub
 # Secret (or export it locally). It is NEVER written in this file.
 GMAIL_USER         = os.environ.get("GMAIL_USER", "Kusalkandel0@gmail.com")
-GMAIL_APP_PASSWORD = os.environ.get("GMAIL_APP_PASSWORD", "")
+# Auto-clean the app password: Google displays it WITH spaces ("abcd efgh ijkl
+# mnop") and hidden newlines sneak in on paste — both break login silently.
+GMAIL_APP_PASSWORD = os.environ.get("GMAIL_APP_PASSWORD", "") \
+    .replace(" ", "").replace("\n", "").replace("\r", "").replace("\t", "")
 RECIPIENT_EMAIL    = os.environ.get("RECIPIENT_EMAIL", GMAIL_USER)
 #   ^ To add more recipients later, set the RECIPIENT_EMAIL secret to a
 #     comma-separated list, e.g.  "you@gmail.com,friend@gmail.com"
@@ -758,6 +761,13 @@ def send_email(pdf_path, total, sections):
             server.send_message(msg)
         log(f"Email sent to {', '.join(recipients)}")
         return True
+    except smtplib.SMTPAuthenticationError:
+        log("Gmail login REJECTED (535). Checklist: 1) it must be the 16-char "
+            "APP password (spaces are auto-removed now), not your Gmail "
+            "password; 2) 2-Step Verification still ON at "
+            "myaccount.google.com/security; 3) create a fresh app password at "
+            "myaccount.google.com/apppasswords and update the secret.", "error")
+        return False
     except Exception as exc:
         log(f"Gmail send failed: {type(exc).__name__}: {exc}", "error")
         return False
@@ -776,8 +786,10 @@ def main():
         raw = collect_all()
         sections, kept = process_sections(raw)
         total = len(kept)
-        pdf_path = build_pdf(sections)
+        # Save dedup memory FIRST — even if the PDF or email step crashes,
+        # tomorrow's run must never re-send today's items.
         save_seen(load_seen(), kept)
+        pdf_path = build_pdf(sections)
         ok = send_email(pdf_path, total, sections)
         log(f"DONE — {total} items, PDF at {pdf_path}, "
             f"sources {STATS['ok']} ok / {STATS['fail']} warn")

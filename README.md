@@ -292,6 +292,24 @@ being padded. If it happens often: ① check the log's
 `OPP_MAX_AGE_DAYS = 7 → 10`; ③ add query terms/regions (section G);
 ④ raise caps if sections hit their limits every day.
 
+**F-6 · `Process completed with exit code 1` (python step) or `exit code 128` (commit step)**
+Read the EXACT error first: **Actions → click the failed run → click
+`digest` → click the red step → expand it.** Then match the line:
+- `[error] Gmail login REJECTED (535)` → wrong/old app password → F-2
+  checklist. (Since v1.1 the script auto-removes spaces from the secret, so
+  pasting `abcd efgh ijkl mnop` is now safe.)
+- `error: pathspec 'seen.json' did not match any files` → python crashed
+  before creating seen.json → look higher in the log for the real traceback
+  (and re-run; one-off network crashes are rare — the new workflow ignores
+  this safely).
+- `remote: Permission to ... denied to github-actions[bot]` or `403` on push
+  → repo Settings → **Actions → General → Workflow permissions** → select
+  **"Read and write permissions"** → Save → re-run. (The workflow already
+  requests write access; this repo-level switch can still block it.)
+- A red step that says **Node.js 20 deprecated** or mentions **Ubuntu 26** is
+  only a NOTICE — harmless, and already fixed by using `checkout@v5` /
+  `setup-python@v6` in the current workflow.
+
 ---
 
 ## G) CUSTOMIZATION GUIDE — every change is one small edit
