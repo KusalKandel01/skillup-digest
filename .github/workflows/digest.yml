@@ -1,6 +1,8 @@
 # ============================================================================
 #  SkillUp Daily Digest — GitHub Actions workflow
-#  Runs every day at 23:15 UTC = 5:00 AM Nepal Time (NPT, UTC+5:45).
+#  Build starts every day at 22:15 UTC = 4:00 AM Nepal Time (NPT, UTC+5:45),
+#  so the email lands by ~5:00 AM NPT even when GitHub's free scheduler is
+#  running late (15-60 min queues are normal under load).
 #  You can also trigger it manually: Actions tab -> Run workflow.
 # ============================================================================
 
@@ -8,10 +10,21 @@ name: SkillUp Daily Digest
 
 on:
   schedule:
-    # 23:15 UTC  ==  05:00 NPT (Nepal, UTC+5:45) the NEXT morning.
-    # GitHub cron ONLY understands UTC. To change delivery time:
-    #   UTC hour = desired NPT hour - 5:45  (e.g. 5:00 AM NPT -> 23:15 UTC)
-    - cron: "15 23 * * *"
+    # FOUR slots per night = a backup ladder, so a skipped or failed slot
+    # can never cost you a day. main.py delivers only the FIRST digest of
+    # each Nepal day; every later slot sees "already delivered today" and
+    # exits in ~1 second (no duplicate email, no wasted fetching).
+    #   22:15 UTC = 04:00 AM NPT  primary  (email lands by ~5:00 AM)
+    #   23:45 UTC = 05:30 AM NPT  backup 1 (if the primary slot was skipped)
+    #   01:45 UTC = 07:30 AM NPT  backup 2 (if both earlier slots failed)
+    #   10:15 UTC = 04:00 PM NPT  same-day rescue (rare GitHub-wide outages)
+    # GitHub cron ONLY understands UTC, is "best effort" (slots can be queued
+    # 15-60 min or occasionally skipped), and fires each slot INDEPENDENTLY
+    # of manual runs. To change delivery time: UTC = desired NPT time - 5:45.
+    - cron: "15 22 * * *"
+    - cron: "45 23 * * *"
+    - cron: "45 1 * * *"
+    - cron: "15 10 * * *"
   workflow_dispatch: {}   # adds the green "Run workflow" button for testing
 
 permissions:
@@ -50,12 +63,15 @@ jobs:
 
       # --------------------------------------------------------------------
       # Commits the dedup memory back so tomorrow's run never re-sends items.
-      # This commit also counts as repo activity, which prevents GitHub from
-      # auto-disabling the schedule after 60 days of inactivity.
+      # ONLY on success: if the run failed (e.g. the email could not be
+      # sent), seen.json stays uncommitted, so the next backup slot re-sends
+      # the full digest instead of losing the day's news. The commit also
+      # counts as repo activity, which prevents GitHub from auto-disabling
+      # the schedule after 60 days of inactivity.
       # Fully guarded: never fails the job when there is nothing to commit.
       # --------------------------------------------------------------------
       - name: Commit seen.json (dedup memory + keeps repo active)
-        if: always()
+        if: success()
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
