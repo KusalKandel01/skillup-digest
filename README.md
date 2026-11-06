@@ -1,8 +1,8 @@
 # 🎓 SkillUp Digest v2.1 "World Edition" — Your Daily Newspaper
 
 A **100% free**, cloud-based system that scans **1,200+ sources across 23 world
-regions** every night and emails you **one professional PDF** at **5:00 AM
-Nepal Time** — covering **every field**: AI/tech, world news, business,
+regions** every night and emails you **one professional PDF** by **5:00 AM
+Nepal Time** (build starts 4:00 AM NPT) — covering **every field**: AI/tech, world news, business,
 science, space, health, climate, sports, entertainment, Nepal + free courses,
 certifications, scholarships, internships, hackathons, webinars, conferences
 and fellowships.
@@ -17,6 +17,15 @@ Your computer stays OFF. GitHub's servers do all the work. **Cost: $0/month.**
 > ② **Beautiful HTML email** — the email is now a styled briefing with a blue
 > header, colored section chips + counts, and **clickable ⭐ Top picks (3 per
 > section)** — plus the same plain-text fallback and PDF attachment.
+>
+> ③ **Never-miss-a-day delivery system** — the nightly build now starts at
+> **4:00 AM NPT** (1 h before your 5 AM target, to absorb GitHub's queuing)
+> **plus 3 backup slots** at 5:30 AM, 7:30 AM and 4:00 PM NPT. `main.py`
+> delivers only the **first digest of each Nepal day** — later slots see
+> "already delivered today" and exit in ~1 second, so you never get
+> duplicates. Failed runs no longer commit `seen.json`, so a crashed send
+> can never burn the day's news — the next slot simply re-sends it.
+> **Re-upload `main.py` AND `digest.yml`** for this to take effect.
 >
 > **What's new in v2.0 (vs v1.3)**
 > | | v1.3 | v2.0 |
@@ -36,7 +45,7 @@ Your computer stays OFF. GitHub's servers do all the work. **Cost: $0/month.**
               ┌──────────────────────────────────────────────────────────┐
               │            GITHUB ACTIONS CLOUD (free, 24/7)             │
               │                                                          │
- 23:15 UTC ──►│  cron: "15 23 * * *"   (= 5:00 AM NPT next morning)      │
+ 22:15 UTC ──►│  cron ×4 slots/night  (= 4:00 AM NPT → mail by ~5:00)    │
  (every day)  │        │                                                 │
               │        ▼                                                 │
               │  ┌────────────┐   70 direct RSS feeds                    │
@@ -180,12 +189,13 @@ skillup-digest/
 ├── README.md                    ← this guide
 └── .github/
     └── workflows/
-        └── digest.yml           ← the daily cron (23:15 UTC = 5:00 AM NPT)
+        └── digest.yml           ← cron ×4: 22:15/23:45/01:45/10:15 UTC
 ```
 
-> 🔁 **Already running v1.x?** You only need to replace **`main.py`**
-> (and optionally this README). `requirements.txt` and `digest.yml` are
-> unchanged — no new secrets, no new settings. Commit and re-run.
+> 🔁 **Already running v1.x or v2.0?** You only need to replace **`main.py`**
+> and **`digest.yml`** (the never-miss-a-day backup ladder — see ③ above),
+> plus optionally this README. `requirements.txt` is unchanged — no new
+> secrets, no new settings. Commit and re-run.
 
 ---
 
@@ -261,7 +271,10 @@ skillup-digest/
    A couple of `[warn]` lines are **normal** (one flaky source never breaks
    the run). A red ❌ means read section F below.
 5. Note: the schedule shows on the Actions page in **UTC**, listed as
-   *"Schedule: 15 23 * * *"* — that is correct for 5:00 AM NPT.
+   *"Schedule: 15 22 * * *, 45 23 * * *, 45 1 * * *, 15 10 * * *"* — all four
+   slots are correct: 4:00 AM NPT primary + 5:30 AM / 7:30 AM / 4:00 PM NPT
+   backups. `main.py` sends only the first digest of each Nepal day, so you
+   get exactly one email even though the workflow fires 4 times.
 
 ### Step 6 — Verify daily life
 
@@ -275,20 +288,34 @@ skillup-digest/
 
 ---
 
-## ⏰ TIMEZONE CHEAT-SHEET (why the cron is `"15 23 * * *"`)
+## ⏰ TIMEZONE CHEAT-SHEET (the cron + backup ladder)
 
 GitHub cron understands **only UTC**. Nepal is **UTC+5:45**:
 
 | You want (NPT) | Minus 5:45 | UTC cron | Cron string |
 |----------------|-----------|----------|-------------|
-| **5:00 AM** ✅ current | 23:15 (prev. day) | 23:15 | `"15 23 * * *"` |
+| **4:00 AM build start** ✅ current | 22:15 (prev. day) | 22:15 | `"15 22 * * *"` |
+| 5:30 AM backup 1 | 23:45 (prev. day) | 23:45 | `"45 23 * * *"` |
+| 7:30 AM backup 2 | 01:45 | 01:45 | `"45 1 * * *"` |
+| 4:00 PM same-day rescue | 10:15 | 10:15 | `"15 10 * * *"` |
 | 6:00 AM | 00:15 | 00:15 | `"15 0 * * *"` |
 | 7:00 AM | 01:15 | 01:15 | `"15 1 * * *"` |
 | 8:00 PM | 14:15 | 14:15 | `"15 14 * * *"` |
 
 Formula: **UTC time = NPT time − 5 hours 45 minutes** (if negative, add 24 h).
-Note: GitHub scheduled runs can start a few minutes late — that's normal and
-free-tier behaviour, not a bug.
+
+**Why start at 4:00 AM if you want the mail by 5:00 AM?** GitHub's scheduler
+is *best effort*: under load, scheduled jobs are commonly queued **15–60
+minutes** (occasionally longer), and a slot can even be skipped entirely.
+The 1-hour head start means even a slow start still delivers your email
+around 5:00 AM NPT. The **three backup slots** make a missed day virtually
+impossible: if the 4:00 AM slot is skipped or fails, the 5:30 AM slot sends
+instead; then 7:30 AM; and a 4:00 PM rescue covers even a GitHub-wide
+morning outage. Because `main.py` sends only the **first** digest of each
+Nepal day, the backups exit in ~1 second once the email is out — you always
+get exactly one email, just never zero. Manual *Run workflow* runs always
+send (so running one manually on a day the email already arrived gives you
+a second, thinner email — expected, not a bug).
 
 ---
 
@@ -374,12 +401,15 @@ supports it via two extra secrets: e.g. for Outlook/Hotmail set
 address in `GMAIL_USER` and its app password in `GMAIL_APP_PASSWORD`.
 After fixing: Actions → Run workflow → re-test.
 
-**F-3 · "It ran at the wrong time!" (timezone confusion)**
-GitHub schedules in **UTC only** and may start **up to ~15 min late** on the
-free tier. `15 23 * * *` = **23:15 UTC = 5:00 AM NPT** — the Actions page
-will always *display* 23:15; do not "fix" it into 5:15. Use the cheat-sheet
-above for any other delivery hour. (If it seems hours off, check whether a
-`workflow_dispatch` manual run is what you're looking at.)
+**F-3 · "It ran at the wrong time / is late!" (timezone + scheduler delays)**
+GitHub schedules in **UTC only** and its free scheduler may start jobs
+**15–60+ min late** under load. The primary slot `15 22 * * *` = **22:15 UTC
+= 4:00 AM NPT build start** — the Actions page will always *display* 22:15,
+23:45, 01:45 and 10:15; do not "fix" them. The 1-hour head start is
+deliberate, and the three backup slots fire automatically if a slot is
+skipped. (If it seems hours off, check whether a `workflow_dispatch` manual
+run is what you're looking at — the run list shows the trigger: "Scheduled"
+vs "Manual run".)
 
 **F-4 · "GitHub disabled my scheduled workflow (60 days)"**
 GitHub turns off crons after **60 days of no repo activity**. This project
@@ -414,6 +444,18 @@ Read the EXACT error first: **Actions → click the failed run → click
 - A red step that says **Node.js 20 deprecated** or mentions **Ubuntu 26** is
   only a NOTICE — harmless, and already fixed by using `checkout@v5` /
   `setup-python@v6` in the current workflow.
+
+**F-7 · "I got two emails today" / "the log says already delivered"**
+The backup ladder sends at most **ONE digest per Nepal day**, but a manual
+*Run workflow* run always sends — so running one manually after the
+scheduled email (or on a day you already tested) gives you a second,
+thinner email. Harmless. Conversely, if a run's log says *"already
+delivered by an earlier run today — backup slot exiting"*, that's the
+system working as designed: an earlier slot already sent today's digest,
+so this one skipped itself in ~1 second. And if you ever see a failed run
+followed by a later successful one that re-sent the full digest — that is
+the anti-data-loss rule: failed runs don't commit `seen.json`, so the next
+slot re-sends everything instead of losing the day's news.
 
 ---
 

@@ -20,7 +20,9 @@
 #  climate, sports, entertainment, Nepal + courses, certifications,
 #  scholarships, internships, hackathons, webinars, conferences, fellowships.
 #
-#  Schedule: runs at 23:15 UTC = 5:00 AM Nepal time (NPT, UTC+5:45).
+#  Schedule: build starts 22:15 UTC = 4:00 AM Nepal time (NPT, UTC+5:45),
+#            so the email lands by ~5:00 AM NPT even when GitHub's free
+#            scheduler queues the job (15-60 min delays are normal).
 #  Cost: $0. Credentials live in GitHub Secrets — never in this file.
 #
 #  Run locally:  python main.py        (PDF is saved to ./digest_output/
@@ -480,6 +482,13 @@ NPT = timezone(timedelta(hours=5, minutes=45))   # Nepal Time UTC+5:45
 DATE_STR = datetime.now(NPT).strftime("%d %b %Y")
 PDF_PATH = os.path.join(OUTPUT_DIR, f"SkillUp-Digest-{datetime.now(NPT):%Y-%m-%d}.pdf")
 
+# What started this run? GitHub sets GITHUB_EVENT_NAME automatically on
+# Actions: "schedule" = one of the nightly cron slots, "workflow_dispatch" =
+# the manual Run-workflow button. Absent = you ran it locally.
+# The backup-ladder guard (see main) only applies to scheduled runs, so
+# manual and local runs ALWAYS send — handy for testing.
+TRIGGER = os.environ.get("GITHUB_EVENT_NAME", "").strip() or "local"
+
 STATS = {"ok": 0, "fail": 0}
 STATS_LOCK = threading.Lock()
 
@@ -639,9 +648,10 @@ def load_seen():
     try:
         with open(SEEN_FILE, "r", encoding="utf-8") as fh:
             data = json.load(fh)
-            return {"urls": data.get("urls", {}), "titles": data.get("titles", {})}
+            return {"urls": data.get("urls", {}), "titles": data.get("titles", {}),
+                    "last_digest_date": data.get("last_digest_date")}
     except Exception:
-        return {"urls": {}, "titles": {}}
+        return {"urls": {}, "titles": {}, "last_digest_date": None}
 
 
 def prune_seen(seen):
@@ -1177,21 +1187,45 @@ def main():
     log("=" * 62)
     log(f"SkillUp Digest v2.1 starting — {DATE_STR} (NPT)")
     log(f"Recipient: {RECIPIENT_EMAIL} | App password set: {bool(GMAIL_APP_PASSWORD)}")
+    log(f"Trigger: {TRIGGER}")
     log("=" * 62)
+    seen = load_seen()
+    # -----------------------------------------------------------------------
+    # BACKUP-LADDER GUARD — the workflow fires 4 cron slots per Nepal day
+    # (4:00 / 5:30 / 7:30 AM and 4:00 PM NPT) so a skipped or failed slot
+    # can never cost you a day, but you must still receive exactly ONE
+    # digest. If a scheduled run starts and today's digest was already
+    # delivered by an earlier slot, exit here in ~1 second: no fetching,
+    # no email, no duplicate. Manual "Run workflow" runs and local runs
+    # always send (so you can always test on demand).
+    # -----------------------------------------------------------------------
+    today_npt = datetime.now(NPT).strftime("%Y-%m-%d")
+    if TRIGGER == "schedule" and seen.get("last_digest_date") == today_npt:
+        log(f"Digest for {today_npt} (NPT) was already delivered by an earlier "
+            f"run today — backup slot exiting without sending. [ok]")
+        return 0
     try:
         raw = collect_all()
         sections, kept = process_sections(raw)
         total = len(kept)
         # Save dedup memory FIRST — even if the PDF or email step crashes,
         # tomorrow's run must never re-send today's items.
-        save_seen(load_seen(), kept)
+        save_seen(seen, kept)
         pdf_path = build_pdf(sections)
         ok = send_email(pdf_path, total, sections)
         log(f"DONE — {total} items, PDF at {pdf_path}, "
             f"sources {STATS['ok']} ok / {STATS['fail']} warn")
         if not GMAIL_APP_PASSWORD:
             return 0          # local test mode without email — not an error
-        return 0 if ok else 1
+        if ok:
+            # Stamp today (NPT) as delivered so the remaining backup slots
+            # tonight skip themselves. The workflow only COMMITS seen.json
+            # when the run succeeded, so a failed send never burns the
+            # day's news — the next backup slot re-sends it instead.
+            seen["last_digest_date"] = today_npt
+            save_seen(seen, [])   # re-save with the marker (no new hashes)
+            return 0
+        return 1
     except Exception:
         log("UNEXPECTED CRASH:\n" + traceback.format_exc(), "error")
         return 1
