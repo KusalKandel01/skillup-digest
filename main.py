@@ -20,9 +20,11 @@
 #  climate, sports, entertainment, Nepal + courses, certifications,
 #  scholarships, internships, hackathons, webinars, conferences, fellowships.
 #
-#  Schedule: build starts 22:15 UTC = 4:00 AM Nepal time (NPT, UTC+5:45),
-#            so the email lands by ~5:00 AM NPT even when GitHub's free
-#            scheduler queues the job (15-60 min delays are normal).
+#  Schedule: the GitHub workflow fires FOUR nightly slots (all Nepal time):
+#            2:30 AM (primary) / 4:30 AM / 6:15 AM (backups) / 4:00 PM (rescue).
+#            The first slot that gets through delivers the digest; later
+#            slots exit in ~1 s (single-email guard). So the email normally
+#            lands between 2:30 and 4:30 AM NPT — ready for a 5:00 AM read.
 #  Cost: $0. Credentials live in GitHub Secrets — never in this file.
 #
 #  Run locally:  python main.py        (PDF is saved to ./digest_output/
@@ -74,14 +76,14 @@ def _env(name, default):
 # --- Email account ----------------------------------------------------------
 # GMAIL_APP_PASSWORD is a 16-character App Password — set it as a GitHub
 # Secret (or export it locally). It is NEVER written in this file.
-GMAIL_USER         = _env("GMAIL_USER", "Kusalkandel0@gmail.com")
+GMAIL_USER         = _env("GMAIL_USER", "")   # set via GitHub Secret — never in this file
 # Auto-clean the app password: Google displays it WITH spaces ("abcd efgh ijkl
 # mnop") and hidden newlines sneak in on paste — both break login silently.
 GMAIL_APP_PASSWORD = os.environ.get("GMAIL_APP_PASSWORD", "") \
     .replace(" ", "").replace("\n", "").replace("\r", "").replace("\t", "")
 RECIPIENT_EMAIL    = _env("RECIPIENT_EMAIL", GMAIL_USER)
 #   ^ To add more recipients later, set the RECIPIENT_EMAIL secret to a
-#     comma-separated list, e.g.  "you@gmail.com,friend@gmail.com"
+#     comma-separated list, e.g.  "you@example.com,friend@example.com"
 
 # --- SMTP server (only change this if you send from a NON-Gmail provider) ----
 #    Gmail default:  smtp.gmail.com  port 465 (SSL)
@@ -480,6 +482,10 @@ SKIP_TITLE_PREFIXES = ("Author Correction", "Publisher Correction", "Correction"
 
 NPT = timezone(timedelta(hours=5, minutes=45))   # Nepal Time UTC+5:45
 DATE_STR = datetime.now(NPT).strftime("%d %b %Y")
+# Exact generation/send moment shown in the subject, email header, PDF cover
+# and logs, so you always know how fresh today's digest is. Refreshed at the
+# moment the email is composed (see build_email_message).
+SENT_TIME_STR = datetime.now(NPT).strftime("%d %b %Y, %I:%M %p")
 PDF_PATH = os.path.join(OUTPUT_DIR, f"SkillUp-Digest-{datetime.now(NPT):%Y-%m-%d}.pdf")
 
 # What started this run? GitHub sets GITHUB_EVENT_NAME automatically on
@@ -983,7 +989,7 @@ def build_pdf(sections):
                             spaceAfter=6))
     story.append(Paragraph(
         f"Your daily intelligence briefing &nbsp;·&nbsp; {DATE_STR} "
-        f"&nbsp;·&nbsp; delivered 5:00 AM NPT", ST_COVER_SUB))
+        f"&nbsp;·&nbsp; generated {SENT_TIME_STR} NPT", ST_COVER_SUB))
     story.append(Spacer(1, 9 * mm))
     story.append(Paragraph(f"{total} fresh items across {len(SECTIONS)} sections "
                            f"({n_news} news · {n_opp} opportunities)", ST_COVER_BIG))
@@ -1096,7 +1102,8 @@ def _email_html(total, sections):
     &#127891; SkillUp Digest</div>
    <div style="color:#BFDBFE;font-size:13px;margin-top:6px;">
     {DATE_STR} &nbsp;&middot;&nbsp; {total} fresh items
-    &nbsp;&middot;&nbsp; {n_news} news + {n_opp} opportunities</div>
+    &nbsp;&middot;&nbsp; {n_news} news + {n_opp} opportunities
+    <br>Last updated: <b>{SENT_TIME_STR} NPT</b></div>
   </div>
   <div style="padding:22px 26px;">
    <p style="font-size:14px;color:#334155;margin:0 0 14px 0;">
@@ -1118,9 +1125,12 @@ def _email_html(total, sections):
 
 def build_email_message(pdf_path, total, sections):
     """Compose the complete email: plain text + HTML alternative + PDF."""
+    global SENT_TIME_STR
+    SENT_TIME_STR = datetime.now(NPT).strftime("%d %b %Y, %I:%M %p")
     recipients = [e.strip() for e in RECIPIENT_EMAIL.split(",") if e.strip()]
 
     plain_lines = ["Hello!", "", "Here is today's SkillUp Digest.", "",
+                   f"Sent: {SENT_TIME_STR} (Nepal time)", "",
                    f"{total} new items across {len(SECTIONS)} sections:"]
     for sec in SECTIONS:
         plain_lines.append(f"  • {sec['title']}: {len(sections.get(sec['key'], []))}")
@@ -1135,7 +1145,8 @@ def build_email_message(pdf_path, total, sections):
     mixed = MIMEMultipart("mixed")
     mixed["From"] = GMAIL_USER
     mixed["To"] = ", ".join(recipients)
-    mixed["Subject"] = f"🎓 SkillUp Digest — {total} updates + news — {DATE_STR}"
+    mixed["Subject"] = (f"🎓 SkillUp Digest — {total} updates + news — "
+                        f"{SENT_TIME_STR} NPT")
     mixed["Date"] = formatdate(localtime=True)
 
     alt = MIMEMultipart("alternative")
@@ -1188,11 +1199,13 @@ def main():
     log(f"SkillUp Digest v2.1 starting — {DATE_STR} (NPT)")
     log(f"Recipient: {RECIPIENT_EMAIL} | App password set: {bool(GMAIL_APP_PASSWORD)}")
     log(f"Trigger: {TRIGGER}")
+    log("Plan: first successful slot of this Nepal day sends the digest, "
+        "later slots exit. Slots: 2:30 AM / 4:30 AM / 6:15 AM / 4:00 PM NPT")
     log("=" * 62)
     seen = load_seen()
     # -----------------------------------------------------------------------
     # BACKUP-LADDER GUARD — the workflow fires 4 cron slots per Nepal day
-    # (4:00 / 5:30 / 7:30 AM and 4:00 PM NPT) so a skipped or failed slot
+    # (2:30 / 4:30 / 6:15 AM and 4:00 PM NPT) so a skipped or failed slot
     # can never cost you a day, but you must still receive exactly ONE
     # digest. If a scheduled run starts and today's digest was already
     # delivered by an earlier slot, exit here in ~1 second: no fetching,
