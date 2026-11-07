@@ -20,11 +20,13 @@
 #  climate, sports, entertainment, Nepal + courses, certifications,
 #  scholarships, internships, hackathons, webinars, conferences, fellowships.
 #
-#  Schedule: the GitHub workflow fires FOUR nightly slots (all Nepal time):
-#            2:30 AM (primary) / 4:30 AM / 6:15 AM (backups) / 4:00 PM (rescue).
-#            The first slot that gets through delivers the digest; later
-#            slots exit in ~1 s (single-email guard). So the email normally
-#            lands between 2:30 and 4:30 AM NPT — ready for a 5:00 AM read.
+#  Schedule: HARD DEADLINE ~9-10 AM NPT. SIXTEEN morning slots — every
+#            30 min from 2:30 AM to 10:00 AM NPT — plus 3 daytime rescues
+#            (12:00 PM / 4:00 PM / 8:00 PM). The first slot that gets
+#            through delivers; later slots exit in ~13 s (single-email
+#            guard), and the email send itself retries 3x on soft failures.
+#            The email normally lands between 2:30 and 4:30 AM NPT —
+#            ready for a 5:00 AM read.
 #  Cost: $0. Credentials live in GitHub Secrets — never in this file.
 #
 #  Run locally:  python main.py        (PDF is saved to ./digest_output/
@@ -1171,23 +1173,37 @@ def send_email(pdf_path, total, sections):
     recipients = [e.strip() for e in RECIPIENT_EMAIL.split(",") if e.strip()]
     msg = build_email_message(pdf_path, total, sections)
 
-    try:
-        with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, timeout=40) as server:
-            server.login(GMAIL_USER, GMAIL_APP_PASSWORD)
-            server.send_message(msg)
-        log(f"Email sent to {', '.join(recipients)} "
-            f"(HTML briefing + PDF attachment)")
-        return True
-    except smtplib.SMTPAuthenticationError:
-        log("Gmail login REJECTED (535). Checklist: 1) it must be the 16-char "
-            "APP password (spaces are auto-removed now), not your Gmail "
-            "password; 2) 2-Step Verification still ON at "
-            "myaccount.google.com/security; 3) create a fresh app password at "
-            "myaccount.google.com/apppasswords and update the secret.", "error")
-        return False
-    except Exception as exc:
-        log(f"Gmail send failed: {type(exc).__name__}: {exc}", "error")
-        return False
+    # RETRY LADDER — a single dropped connection must never cost the day.
+    # Transient errors (timeout, reset, 4xx rate-limit) are retried 3x with
+    # a growing pause. A wrong password (535) is permanent — retrying cannot
+    # fix it, so we fail fast and let the next backup slot try tomorrow.
+    for attempt in (1, 2, 3):
+        try:
+            with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, timeout=40) as server:
+                server.login(GMAIL_USER, GMAIL_APP_PASSWORD)
+                server.send_message(msg)
+            log(f"Email sent to {', '.join(recipients)} "
+                f"(HTML briefing + PDF attachment)"
+                + (f" — attempt {attempt}" if attempt > 1 else ""))
+            return True
+        except smtplib.SMTPAuthenticationError:
+            log("Gmail login REJECTED (535). Retrying cannot fix a wrong "
+                "password. Checklist: 1) it must be the 16-char APP password "
+                "(spaces are auto-removed now), not your Gmail password; "
+                "2) 2-Step Verification still ON at "
+                "myaccount.google.com/security; 3) create a fresh app "
+                "password at myaccount.google.com/apppasswords and update "
+                "the secret.", "error")
+            return False
+        except Exception as exc:
+            log(f"Gmail send attempt {attempt}/3 failed: "
+                f"{type(exc).__name__}: {exc}",
+                "warn" if attempt < 3 else "error")
+            if attempt < 3:
+                time.sleep(10 * attempt)   # 10 s, then 20 s, then give up
+    log("Giving up on this slot — the next backup slot will re-run the "
+        "full delivery (today's news is NOT lost).", "error")
+    return False
 
 
 # ============================================================================
@@ -1200,12 +1216,14 @@ def main():
     log(f"Recipient: {RECIPIENT_EMAIL} | App password set: {bool(GMAIL_APP_PASSWORD)}")
     log(f"Trigger: {TRIGGER}")
     log("Plan: first successful slot of this Nepal day sends the digest, "
-        "later slots exit. Slots: 2:30 AM / 4:30 AM / 6:15 AM / 4:00 PM NPT")
+        "later slots exit. Morning: a try every 30 min, 2:30-10:00 AM; "
+        "rescues: 12:00 PM / 4:00 PM / 8:00 PM NPT")
     log("=" * 62)
     seen = load_seen()
     # -----------------------------------------------------------------------
-    # BACKUP-LADDER GUARD — the workflow fires 4 cron slots per Nepal day
-    # (2:30 / 4:30 / 6:15 AM and 4:00 PM NPT) so a skipped or failed slot
+    # BACKUP-LADDER GUARD — the workflow fires 19 cron slots per Nepal day:
+    # every 30 min through the morning (2:30 AM -> 10:00 AM NPT) plus three
+    # daytime rescues, so a skipped or failed slot
     # can never cost you a day, but you must still receive exactly ONE
     # digest. If a scheduled run starts and today's digest was already
     # delivered by an earlier slot, exit here in ~1 second: no fetching,

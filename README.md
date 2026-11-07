@@ -18,8 +18,8 @@ conferences, fellowships and grants).
 No computer left on. No server to rent. No button to press. **It just
 arrives, every single day.**
 
-- 🤖 **Fully automatic** — 4 scheduled runs per night with a self-healing
-  backup ladder and a one-email-per-day guard
+- 🤖 **Fully automatic** — 19 scheduled runs per day: a try every 30 min all
+  morning (2:30–10:00 AM) + 3 rescues, one-email-per-day guard, 3x send retry
 - 🌍 **Every field** — 9 news sections + 8 opportunity sections (17 total)
 - 🧠 **Smart** — 10 parallel fetchers finish ~1,180 searches in ~2 minutes;
   duplicate stories are remembered and never re-sent
@@ -62,25 +62,36 @@ items per day**.
 
 ## ⏰ How it runs itself — fully automatic
 
-The workflow fires **four times every Nepal day**. The first run that
-actually delivers sends the digest; every later run sees *"already delivered
-today"* and exits in ~1 second:
+The workflow fires **19 times every Nepal day**: a run **every 30 minutes
+through the whole morning** (2:30 AM → 10:00 AM, 16 chances), then 3 daytime
+rescues as an absolute last resort. The first run that actually delivers
+sends the digest; every later run sees *"already delivered today"* and exits
+in ~13 seconds — zero duplicate emails.
 
-| UTC | Nepal (NPT) | Role |
-|-----|-------------|------|
-| 20:45 | 2:30 AM | 🥇 **Primary** — you read at 5:00 AM, so we start early; email lands ~2:30–4:00 AM |
-| 22:45 | 4:30 AM | 🥈 Backup 1 — if the primary slot was skipped |
-| 00:30 | 6:15 AM | 🥉 Backup 2 — if both earlier slots failed |
-| 10:15 | 4:00 PM | 🆘 Same-day rescue — covers even a GitHub-wide morning outage |
+| Nepal (NPT) | UTC | Slot |
+|-------------|-----|------|
+| every 30 min, 2:30 AM → 10:00 AM | 20:45 → 04:15 | 🌅 **Morning ladder — 16 tries** so the email lands before the ~9–10 AM deadline (normally 2:30–4:30 AM) |
+| 12:00 PM | 06:15 | 🆘 Rescue 1 |
+| 4:00 PM | 10:15 | 🆘 Rescue 2 |
+| 8:00 PM | 14:15 | 🆘 Rescue 3 — last chance |
 
-> The Actions page shows this as
-> `Schedule: 45 20 * * *, 45 22 * * *, 30 0 * * *, 15 10 * * *` — all four
-> lines are intentional. GitHub cron understands **UTC only**.
+> Why not literally every 5 minutes? GitHub *de-prioritizes the tightest
+> cron schedules* — a 5-min cron gets delayed and skipped **more**, not
+> less. One try every 30 min is the most reliable density GitHub's free
+> scheduler honors, and a missed try is at most 30 min from the next one.
+>
+> The Actions page shows this as a long `Schedule:` list — every line is
+> intentional. GitHub cron understands **UTC only**.
 >
 > **Every email shows exactly when it was generated** — in the subject line
 > (`… — 07 Nov 2026, 02:31 AM NPT`), in the blue header of the HTML body,
 > and on the PDF cover. So you always know the last-update time of what
 > you are reading.
+>
+> 📬 **One-time Gmail tip (do this once):** open any SkillUp Digest email →
+> the ⋮ menu → *Filter messages like this* → *Create filter* → tick
+> **Never send it to Spam**. From then on the digest always reaches your
+> inbox, even on days Gmail feels suspicious.
 
 **Built-in reliability rules** (no configuration needed):
 
@@ -89,11 +100,32 @@ today"* and exits in ~1 second:
 - **A failed run never loses the day's news** — the dedup memory is only
   committed when a run *succeeds*, so the next backup slot re-sends the full
   digest instead of skipping stories.
+- **Soft SMTP failures retry automatically** — each slot tries the Gmail
+  send up to 3 times (10 s / 20 s pauses) before handing over to the next
+  backup slot. A wrong app-password (535) fails fast, since retrying cannot
+  fix it.
 - **Manual *Run workflow* always sends** — perfect for testing on demand.
 - **Never gets disabled** — the daily `seen.json` commit counts as repository
   activity, defeating GitHub's 60-day auto-disable rule.
-- **GitHub's scheduler is "best effort"** (slots can start 15–60+ min late,
-  rarely are skipped) — that is exactly why there are four chances every day.
+- **GitHub's scheduler is "best effort"** (slots can start 15–90 min late,
+  rarely are skipped) — that is exactly why the whole morning is filled:
+  **16 chances before 10 AM**. Missing the deadline would need every
+  morning slot to fail, and the rescues still cover that day.
+
+### 🛡️ "But what if GitHub forgets?" — every failure mode, closed
+
+| Fear | Reality | Already fixed inside |
+|------|---------|----------------------|
+| *"GitHub forgets the schedule"* | Schedules are re-registered from the files on `main` on **every push** — they don't fade away; you can always see them listed on the Actions page | 19 slots: a missed try is retried ≤30 min later |
+| *"GitHub disables the workflow"* | Only possible after **60 days with zero commits** | The bot commits `seen.json` **every single day** → the counter resets daily |
+| *"digest.yml breaks / gets deleted"* | That would kill one file's schedule silently | 🆕 **`watchdog.yml` — an independent second schedule** (11:30 AM + 6:30 PM NPT) in a separate file. Even a broken `digest.yml` cannot stop the daily email; the guard makes the two files duplicate-proof |
+| *"GitHub-wide outage"* | Rare, and usually only hours | The 4 PM / 8 PM rescues + the watchdog + the next morning's ladder |
+| *"Gmail hides the email"* | The email was delivered but filtered | One-time **"Never send it to Spam"** filter (tip above) |
+
+The only thing no code can prevent: a human manually disabling Actions in
+the repository settings. If the Actions page ever shows a *"This scheduled
+workflow is disabled"* banner, press the **Enable** button next to it —
+everything else recovers on its own.
 
 ---
 
