@@ -1,0 +1,76 @@
+# ============================================================================
+#  SkillUp Digest — INDEPENDENT WATCHDOG (safety net #2)
+# ----------------------------------------------------------------------------
+#  digest.yml fires 19 slots/day, but everything there lives in ONE file.
+#  If that file were ever deleted, renamed, or its schedule lost, the ladder
+#  would die SILENTLY. This separate file has its own schedule that GitHub
+#  registers independently — so even a broken digest.yml cannot stop the
+#  daily email.
+#
+#  Same brain (main.py): if today's digest was already delivered, this exits
+#  in ~13 s (the one-email-per-day guard in main.py covers BOTH files). If
+#  today is still missing — for ANY reason — this run delivers it.
+#
+#    05:45 UTC = 11:30 AM NPT   watchdog 1 (30 min after the morning deadline)
+#    12:45 UTC =  6:30 PM NPT   watchdog 2 (evening backstop)
+# ============================================================================
+
+name: SkillUp Watchdog
+
+on:
+  schedule:
+    - cron: "45 5 * * *"    # 11:30 AM Nepal — deliver today if the morning missed
+    - cron: "45 12 * * *"   #  6:30 PM Nepal — evening backstop
+  workflow_dispatch: {}     # manual button, same as the main workflow
+
+permissions:
+  contents: write
+
+# Same group as digest.yml -> the two files can never run at the same
+# moment, so they can never both decide "today is missing" and double-send.
+concurrency:
+  group: skillup-digest
+  cancel-in-progress: false
+
+jobs:
+  watchdog:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Watchdog run (delivers only if today is still missing)
+        env:
+          GMAIL_USER: ${{ secrets.GMAIL_USER }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          RECIPIENT_EMAIL: ${{ secrets.RECIPIENT_EMAIL || secrets.GMAIL_USER }}
+          SMTP_HOST: ${{ secrets.SMTP_HOST || 'smtp.gmail.com' }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT || '465' }}
+        run: python main.py
+
+      - name: Commit seen.json (same rules as the main workflow)
+        if: success()
+        continue-on-error: true
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if [ ! -f seen.json ]; then
+            echo "seen.json was not created this run — nothing to commit"
+            exit 0
+          fi
+          git add seen.json
+          if git diff --cached --quiet; then
+            echo "seen.json unchanged — nothing to commit"
+            exit 0
+          fi
+          git commit -m "chore: update seen.json (watchdog) [skip ci]"
+          git push origin "HEAD:${GITHUB_REF_NAME}"

@@ -1,8 +1,9 @@
 # ============================================================================
 #  SkillUp Daily Digest — GitHub Actions workflow
-#  You read at 5:00 AM NPT, so the PRIMARY slot fires at 20:45 UTC = 2:30 AM
-#  Nepal time — even when GitHub's free scheduler queues the job 30-90 min,
-#  the email still lands well before 5:00 AM.
+#  HARD DEADLINE: the email must arrive before ~9-10 AM Nepal time.
+#  SIXTEEN morning slots (every 30 min, 2:30 AM -> 10:00 AM NPT) + 3 daytime
+#  rescues. You read at 5:00 AM — the ladder starts at 2:30 AM NPT so even a
+#  30-90 min scheduler delay still lands the email before you wake.
 #  You can also trigger it manually: Actions tab -> Run workflow.
 # ============================================================================
 
@@ -10,21 +11,46 @@ name: SkillUp Daily Digest
 
 on:
   schedule:
-    # FOUR slots per night = a backup ladder, so a skipped or failed slot
-    # can never cost you a day. main.py delivers only the FIRST digest of
-    # each Nepal day; every later slot sees "already delivered today" and
-    # exits in ~1 second (no duplicate email, no wasted fetching).
-    #   20:45 UTC = 02:30 AM NPT  primary  (email lands ~2:30-4:00 AM)
-    #   22:45 UTC = 04:30 AM NPT  backup 1 (if the primary slot was skipped)
-    #   00:30 UTC = 06:15 AM NPT  backup 2 (if both earlier slots failed)
-    #   10:15 UTC = 04:00 PM NPT  same-day rescue (rare GitHub-wide outages)
-    # GitHub cron ONLY understands UTC, is "best effort" (slots can be queued
-    # 15-60 min or occasionally skipped), and fires each slot INDEPENDENTLY
-    # of manual runs. To change delivery time: UTC = desired NPT time - 5:45.
-    - cron: "45 20 * * *"   # 2:30 AM Nepal — primary
-    - cron: "45 22 * * *"   # 4:30 AM Nepal — backup 1
-    - cron: "30 0 * * *"    # 6:15 AM Nepal — backup 2
-    - cron: "15 10 * * *"   # 4:00 PM Nepal — same-day rescue
+    # DEADLINE LADDER — the digest MUST arrive before ~9-10 AM Nepal time.
+    # A run starts every 30 minutes through the whole morning (2:30 AM ->
+    # 10:00 AM NPT = 16 chances), then 3 daytime rescues as a last resort.
+    # GitHub's free scheduler is "best effort": it delays slots 15-90 min and
+    # sometimes skips one — but the next try is never more than 30 min away,
+    # and skipping ALL SIXTEEN morning slots has never happened. (A literal
+    # 5-minute cron would be delayed MORE, not less — GitHub de-prioritizes
+    # the tightest schedules, so 30 min is the reliable sweet spot.)
+    # main.py delivers only the FIRST digest of each Nepal day; every later
+    # slot sees "already delivered today" and exits in ~13 s — zero cost,
+    # zero duplicate emails. Each slot fires INDEPENDENTLY.
+    #   16 morning slots (UTC -> NPT):      3 rescues:
+    #   20:45 = 2:30 AM   00:15 = 6:00 AM   06:15 = 12:00 PM
+    #   21:15 = 3:00 AM   00:45 = 6:30 AM   10:15 =  4:00 PM
+    #   21:45 = 3:30 AM   01:15 = 7:00 AM   14:15 =  8:00 PM
+    #   22:15 = 4:00 AM   01:45 = 7:30 AM
+    #   22:45 = 4:30 AM   02:15 = 8:00 AM
+    #   23:15 = 5:00 AM   02:45 = 8:30 AM
+    #   23:45 = 5:30 AM   03:15 = 9:00 AM
+    #                     03:45 = 9:30 AM   04:15 = 10:00 AM (deadline guard)
+    # GitHub cron ONLY understands UTC. To change a time: UTC = NPT - 5:45.
+    - cron: "45 20 * * *"   # 2:30 AM  ┐
+    - cron: "15 21 * * *"   # 3:00 AM  │
+    - cron: "45 21 * * *"   # 3:30 AM  │
+    - cron: "15 22 * * *"   # 4:00 AM  │
+    - cron: "45 22 * * *"   # 4:30 AM  │   MORNING LADDER
+    - cron: "15 23 * * *"   # 5:00 AM  │   a try every 30 minutes
+    - cron: "45 23 * * *"   # 5:30 AM  │   until the 10:00 AM deadline
+    - cron: "15 0 * * *"    # 6:00 AM  │
+    - cron: "45 0 * * *"    # 6:30 AM  │
+    - cron: "15 1 * * *"    # 7:00 AM  │
+    - cron: "45 1 * * *"    # 7:30 AM  │
+    - cron: "15 2 * * *"    # 8:00 AM  │
+    - cron: "45 2 * * *"    # 8:30 AM  │
+    - cron: "15 3 * * *"    # 9:00 AM  │
+    - cron: "45 3 * * *"    # 9:30 AM  │
+    - cron: "15 4 * * *"    # 10:00 AM ┘ (deadline guard)
+    - cron: "15 6 * * *"    # 12:00 PM — rescue 1
+    - cron: "15 10 * * *"   #  4:00 PM — rescue 2
+    - cron: "15 14 * * *"   #  8:00 PM — rescue 3 (absolute last chance)
   workflow_dispatch: {}   # adds the green "Run workflow" button for testing
 
 permissions:
@@ -74,7 +100,8 @@ jobs:
       # --------------------------------------------------------------------
       - name: Commit seen.json (dedup memory + keeps repo active)
         if: success()
-        run: |
+        continue-on-error: true   # a failed commit must NEVER show a red run:
+        run: |                    # the email itself already went out
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           if [ ! -f seen.json ]; then
