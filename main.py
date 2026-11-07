@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # ============================================================================
-#  SKILLUP DIGEST v2.1 "WORLD EDITION"  —  your personal daily newspaper
+#  SKILLUP DIGEST v2.2 "WORLD EDITION"  —  your personal daily newspaper
 # ----------------------------------------------------------------------------
 #  What it does (every day, automatically, on GitHub's free servers):
 #    1. SCANS   ~60 direct RSS feeds + Google News across 23 world regions
@@ -12,6 +12,12 @@
 #    5. EMAILS  a styled HTML briefing (counts + clickable top picks) and the
 #               PDF as an attachment via Gmail
 #
+#  v2.2: EXTERNAL KICKER — the workflow can also be started by a free
+#        external alarm clock (cron-job.org) via GitHub's API
+#        (repository_dispatch "digest-kick"). Those kicks share the
+#        one-email-per-day guard with scheduled runs, so extra pings are
+#        harmless: first successful run delivers, the rest exit in seconds.
+#        Delivery no longer depends on GitHub's best-effort cron scheduler.
 #  v2.1: ELASTIC CAPS — a section flooded with fresh items grows up to 2x its
 #        base cap (CAP_ELASTIC_FACTOR); a quiet section shrinks on its own.
 #        Anything that doesn't fit today is NOT marked as seen, so it gets
@@ -491,11 +497,16 @@ SENT_TIME_STR = datetime.now(NPT).strftime("%d %b %Y, %I:%M %p")
 PDF_PATH = os.path.join(OUTPUT_DIR, f"SkillUp-Digest-{datetime.now(NPT):%Y-%m-%d}.pdf")
 
 # What started this run? GitHub sets GITHUB_EVENT_NAME automatically on
-# Actions: "schedule" = one of the nightly cron slots, "workflow_dispatch" =
-# the manual Run-workflow button. Absent = you ran it locally.
-# The backup-ladder guard (see main) only applies to scheduled runs, so
-# manual and local runs ALWAYS send — handy for testing.
+# Actions: "schedule" = one of the cron slots, "workflow_dispatch" = the
+# manual Run-workflow button, "repository_dispatch" = an external kick from
+# cron-job.org via GitHub's API (the guaranteed morning trigger).
+# Absent = you ran it locally.
+# The one-email-per-day guard (see main) applies to "schedule" AND
+# "repository_dispatch" — so extra kicks never double-send.
+# Manual button runs and local runs ALWAYS send — handy for testing.
 TRIGGER = os.environ.get("GITHUB_EVENT_NAME", "").strip() or "local"
+# Triggers that must respect the one-email-per-day guard:
+GUARDED_TRIGGERS = ("schedule", "repository_dispatch")
 
 STATS = {"ok": 0, "fail": 0}
 STATS_LOCK = threading.Lock()
@@ -1212,7 +1223,7 @@ def send_email(pdf_path, total, sections):
 
 def main():
     log("=" * 62)
-    log(f"SkillUp Digest v2.1 starting — {DATE_STR} (NPT)")
+    log(f"SkillUp Digest v2.2 starting — {DATE_STR} (NPT)")
     log(f"Recipient: {RECIPIENT_EMAIL} | App password set: {bool(GMAIL_APP_PASSWORD)}")
     log(f"Trigger: {TRIGGER}")
     log("Plan: first successful slot of this Nepal day sends the digest, "
@@ -1231,9 +1242,10 @@ def main():
     # always send (so you can always test on demand).
     # -----------------------------------------------------------------------
     today_npt = datetime.now(NPT).strftime("%Y-%m-%d")
-    if TRIGGER == "schedule" and seen.get("last_digest_date") == today_npt:
+    if TRIGGER in GUARDED_TRIGGERS and seen.get("last_digest_date") == today_npt:
         log(f"Digest for {today_npt} (NPT) was already delivered by an earlier "
-            f"run today — backup slot exiting without sending. [ok]")
+            f"run today — duplicate-guard: this trigger ({TRIGGER}) exits "
+            f"without sending. [ok]")
         return 0
     try:
         raw = collect_all()
