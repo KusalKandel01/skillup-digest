@@ -52,6 +52,16 @@ on:
     - cron: "15 10 * * *"   #  4:00 PM — rescue 2
     - cron: "15 14 * * *"   #  8:00 PM — rescue 3 (absolute last chance)
   workflow_dispatch: {}   # adds the green "Run workflow" button for testing
+  # --------------------------------------------------------------------------
+  # EXTERNAL KICK (Plan B) — cron-job.org (free, punctual) POSTs to GitHub's
+  # API every morning:  2:35, 4:35, 7:05 AM NPT  (event_type: digest-kick).
+  # This starts the digest even when GitHub's own cron scheduler sleeps.
+  # main.py applies the one-email-per-day guard to these kicks, so the
+  # backup pings are harmless: the first success delivers, the rest exit
+  # in seconds. The green "Run workflow" button still ALWAYS sends (tests).
+  # --------------------------------------------------------------------------
+  repository_dispatch:
+    types: [digest-kick]
 
 permissions:
   contents: write         # allows the bot to commit seen.json back
