@@ -1,8 +1,8 @@
 # ============================================================================
 #  SkillUp Daily Digest — GitHub Actions workflow
-#  Build starts every day at 22:15 UTC = 4:00 AM Nepal Time (NPT, UTC+5:45),
-#  so the email lands by ~5:00 AM NPT even when GitHub's free scheduler is
-#  running late (15-60 min queues are normal under load).
+#  You read at 5:00 AM NPT, so the PRIMARY slot fires at 20:45 UTC = 2:30 AM
+#  Nepal time — even when GitHub's free scheduler queues the job 30-90 min,
+#  the email still lands well before 5:00 AM.
 #  You can also trigger it manually: Actions tab -> Run workflow.
 # ============================================================================
 
@@ -14,17 +14,17 @@ on:
     # can never cost you a day. main.py delivers only the FIRST digest of
     # each Nepal day; every later slot sees "already delivered today" and
     # exits in ~1 second (no duplicate email, no wasted fetching).
-    #   22:15 UTC = 04:00 AM NPT  primary  (email lands by ~5:00 AM)
-    #   23:45 UTC = 05:30 AM NPT  backup 1 (if the primary slot was skipped)
-    #   01:45 UTC = 07:30 AM NPT  backup 2 (if both earlier slots failed)
+    #   20:45 UTC = 02:30 AM NPT  primary  (email lands ~2:30-4:00 AM)
+    #   22:45 UTC = 04:30 AM NPT  backup 1 (if the primary slot was skipped)
+    #   00:30 UTC = 06:15 AM NPT  backup 2 (if both earlier slots failed)
     #   10:15 UTC = 04:00 PM NPT  same-day rescue (rare GitHub-wide outages)
     # GitHub cron ONLY understands UTC, is "best effort" (slots can be queued
     # 15-60 min or occasionally skipped), and fires each slot INDEPENDENTLY
     # of manual runs. To change delivery time: UTC = desired NPT time - 5:45.
-    - cron: "15 22 * * *"
-    - cron: "45 23 * * *"
-    - cron: "45 1 * * *"
-    - cron: "15 10 * * *"
+    - cron: "45 20 * * *"   # 2:30 AM Nepal — primary
+    - cron: "45 22 * * *"   # 4:30 AM Nepal — backup 1
+    - cron: "30 0 * * *"    # 6:15 AM Nepal — backup 2
+    - cron: "15 10 * * *"   # 4:00 PM Nepal — same-day rescue
   workflow_dispatch: {}   # adds the green "Run workflow" button for testing
 
 permissions:
@@ -52,11 +52,13 @@ jobs:
 
       - name: Run SkillUp Digest (fetch -> PDF -> email)
         env:
-          # The "|| 'default'" protects against secrets that were never
-          # created (GitHub sends those as empty strings).
-          GMAIL_USER: ${{ secrets.GMAIL_USER || 'Kusalkandel0@gmail.com' }}
+          # All credentials come from repo Secrets — nothing personal is
+          # stored in this file. GitHub passes secrets you never created as
+          # empty strings; main.py handles those safely (no crash, and the
+          # run still produces the PDF locally without sending).
+          GMAIL_USER: ${{ secrets.GMAIL_USER }}
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
-          RECIPIENT_EMAIL: ${{ secrets.RECIPIENT_EMAIL || secrets.GMAIL_USER || 'Kusalkandel0@gmail.com' }}
+          RECIPIENT_EMAIL: ${{ secrets.RECIPIENT_EMAIL || secrets.GMAIL_USER }}
           SMTP_HOST: ${{ secrets.SMTP_HOST || 'smtp.gmail.com' }}
           SMTP_PORT: ${{ secrets.SMTP_PORT || '465' }}
         run: python main.py
